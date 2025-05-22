@@ -21,7 +21,7 @@ wheels/
 *.egg
 
 # 数据集文件
-dataset/
+# dataset/
 dataset/**/
 system/Cifar100_clustered/
 */dataset/
