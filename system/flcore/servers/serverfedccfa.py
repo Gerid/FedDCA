@@ -57,7 +57,7 @@ class FedCCFA(Server):
             clients: 客户端列表
         """
         for client in clients:
-            self.client_data_size[client.id] = len(client.train_samples)
+            self.client_data_size[client.id] = client.train_samples
 
     def send_params(self, selected_clients):
         """
@@ -592,47 +592,8 @@ class FedCCFA(Server):
             avg_time = sum(self.Budget) / len(self.Budget)
             print(f"平均每轮耗时: {avg_time:.2f}秒")
         
-        # 保存结果和模型
+        # 保存结果
         self.save_results()
-        self.save_models()
 
-    def save_models(self):
-        """保存全局模型"""
-        if not os.path.exists("saved_models"):
-            os.makedirs("saved_models")
-        
-        # 保存全局模型
-        torch.save(self.global_model.state_dict(), 
-                  os.path.join("saved_models", f"FedCCFA_global_{self.dataset}_{self.times}.pt"))
-        
-        print(f"模型保存完成：全局模型已保存到 saved_models/FedCCFA_global_{self.dataset}_{self.times}.pt")
     
-    def save_results(self):
-        """保存训练结果"""
-        if not os.path.exists("results"):
-            os.makedirs("results")
-        
-        # 保存精度和损失
-        algo = self.algorithm
-        result_path = f"results/{self.dataset}_{algo}_{self.goal}_{self.times}.h5"
-        
-        with h5py.File(result_path, 'w') as hf:
-            hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
-            hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
-            hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
-        
-        print(f"结果已保存到 {result_path}")
-    
-    def set_clients(self, clientObj):
-        """初始化客户端对象"""
-        for i in range(self.num_clients):
-            train_data = read_client_data(self.dataset, i, is_train=True, data_dir=self.args.drift_data_dir if hasattr(self.args, 'drift_data_dir') else None)
-            test_data = read_client_data(self.dataset, i, is_train=False, data_dir=self.args.drift_data_dir if hasattr(self.args, 'drift_data_dir') else None)
-            
-            client = clientObj(self.args, 
-                            id=i, 
-                            train_samples=train_data, 
-                            test_samples=test_data, 
-                            train_slow=self.train_slow_clients, 
-                            send_slow=self.send_slow_clients)
-            self.clients.append(client)
+   

@@ -13,7 +13,6 @@ num_clients = 20
 num_classes = 10
 dir_path = "Cifar10/"
 
-def 
 
 
 # Allocate data to users

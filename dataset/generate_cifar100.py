@@ -420,15 +420,25 @@ if __name__ == "__main__":
         balance = False
 
     partition = "dir"
-    
-    cluster_info = generate_cifar100_with_clusters(
-        data_dir="Cifar100_clustered/",  # 数据存储路径
-        client_count=20,                 # 客户端数量
-        class_count=100,                 # 类别数量
-        is_niid=True,                    # 非独立同分布设置
-        is_balanced=False,               # 非平衡分配
-        partition_type="dir",            # 分区方式
-        num_concepts=5,                  # 概念数量
-        iterations=200,                  # 时间迭代数量
-        num_drifts=5                     # 漂移次数
-    )
+
+    if len(sys.argv) >3:
+        generate_cifar100(
+            data_dir="Cifar100/",  # 数据存储路径
+            client_count=20,                 # 客户端数量
+            class_count=100,                 # 类别数量
+            is_niid=True,                    # 非独立同分布设置
+            is_balanced=False,               # 非平衡分配
+            partition_type="dir",           
+        )
+    else:
+        cluster_info = generate_cifar100_with_clusters(
+            data_dir="Cifar100_clustered/",  # 数据存储路径
+            client_count=20,                 # 客户端数量
+            class_count=100,                 # 类别数量
+            is_niid=True,                    # 非独立同分布设置
+            is_balanced=False,               # 非平衡分配
+            partition_type="dir",            # 分区方式
+            num_concepts=5,                  # 概念数量
+            iterations=200,                  # 时间迭代数量
+            num_drifts=5                     # 漂移次数
+        )

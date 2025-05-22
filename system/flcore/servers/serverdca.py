@@ -458,7 +458,9 @@ class FedDCA(Server):
 
         except Exception as e:
             print(f"Error in update_global_model: {str(e)}")
-            # 发生错误时保持当前模型状态    def select_clustering_algorithm(self):
+            # 发生错误时保持当前模型状态    
+    
+    def select_clustering_algorithm(self):
         """
         根据配置选择使用的聚类算法
         

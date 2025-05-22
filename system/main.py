@@ -324,7 +324,7 @@ def run(args):
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
             server = FedIFCA(args, i)
-            
+        
         elif args.algorithm == "FedCCFA":
             # 为FedCCFA设置特定参数
             if not hasattr(args, 'clf_epochs'):
@@ -339,6 +339,10 @@ def run(args):
                 args.eps = 0.5  # DBSCAN 聚类的 eps 参数
             if not hasattr(args, 'weights'):
                 args.weights = 'label'  # 聚合权重方式 ('uniform' 或 'label')
+            
+            # 包装模型以支持特征提取
+            from flcore.trainmodel.feature_extractors import wrap_model_for_feature_extraction
+            args.model = wrap_model_for_feature_extraction(args.model)
                 
             server = FedCCFA(args, i)
             
@@ -475,6 +479,31 @@ if __name__ == "__main__":
     parser.add_argument('-cm', "--clustering_method", type=str, default="enhanced_label",
                         choices=["vwc", "label_conditional", "enhanced_label"],
                        help="聚类方法: vwc (原始变分Wasserstein聚类) 或 label_conditional (基于标签的条件Wasserstein聚类)")
+    # FedCCFA
+    parser.add_argument('-cle', "--clf_epochs", type=int, default=1, 
+                        help="FedCCFA分类器训练轮数")
+    parser.add_argument('-rpe', "--rep_epochs", type=int, default=1, 
+                        help="FedCCFA表示层训练轮数")
+    parser.add_argument('-be', "--balanced_epochs", type=int, default=1, 
+                        help="FedCCFA平衡训练轮数")
+    parser.add_argument('-lp', "--lambda_proto", type=float, default=0.1, 
+                        help="FedCCFA原型损失权重")
+    parser.add_argument('-eps', "--eps", type=float, default=0.5, 
+                        help="FedCCFA DBSCAN聚类的eps参数")
+    parser.add_argument('-wts', "--weights", type=str, default="label",
+                        choices=["uniform", "label"], 
+                        help="FedCCFA聚合权重方式 (uniform或label)")
+    parser.add_argument('-pnz', "--penalize", type=str, default="L2",
+                        choices=["L2", "contrastive"], 
+                        help="FedCCFA原型损失类型 (L2或contrastive)")
+    parser.add_argument('-tmp', "--temperature", type=float, default=0.5,
+                        help="FedCCFA对比学习温度参数")
+    parser.add_argument('-gm', "--gamma", type=float, default=0.0,
+                        help="FedCCFA自适应原型权重参数,0表示使用固定权重")
+    parser.add_argument('-orc', "--oracle", action='store_true',
+                        help="FedCCFA使用Oracle合并策略")
+    parser.add_argument('-cp', "--clustered_protos", action='store_true',
+                        help="FedCCFA使用聚类原型")
     parser.add_argument('-ci', "--cluster_interval", type=int, default=5, 
                        help="执行聚类的轮次间隔")
     parser.add_argument('-vc', "--visualize_clusters", type=bool, default=True,

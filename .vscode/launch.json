@@ -27,7 +27,7 @@
                 "-m",
                 "cnn",
                 "-algo",
-                "FedIFCA",
+                "FedCCFA",
                 "-gr",
                 "200",
                 "-lbs",
