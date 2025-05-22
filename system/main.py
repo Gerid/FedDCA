@@ -442,10 +442,30 @@ if __name__ == "__main__":
     parser.add_argument('-Ts', "--T_start", type=float, default=0.95)
     parser.add_argument('-Te', "--T_end", type=float, default=0.98)
     # GPFL
-    parser.add_argument('-lamr', "--lamda_reg", type=float, default=0.0)
-
-    # FedDCA
+    parser.add_argument('-lamr', "--lamda_reg", type=float, default=0.0)    # FedDCA
     parser.add_argument('-encpath', "--autoencoder_model_path", type=str, default="/enc_path")
+    parser.add_argument('-ncs', "--num_clusters", type=int, default=5)
+    parser.add_argument('-st', "--split_threshold", type=float, default=0.3)
+    parser.add_argument('-mt', "--merge_threshold", type=float, default=0.05)
+    parser.add_argument('-ks', "--kde_samples", type=int, default=100)
+    parser.add_argument('-cm', "--clustering_method", type=str, default="enhanced_label",
+                        choices=["vwc", "label_conditional", "enhanced_label"],
+                       help="聚类方法: vwc (原始变分Wasserstein聚类) 或 label_conditional (基于标签的条件Wasserstein聚类)")
+    parser.add_argument('-ci', "--cluster_interval", type=int, default=5, 
+                       help="执行聚类的轮次间隔")
+    parser.add_argument('-vc', "--visualize_clusters", type=bool, default=True,
+                       help="是否可视化聚类结果")
+    parser.add_argument('-vi', "--vis_interval", type=int, default=10,
+                       help="聚类可视化的轮次间隔")
+    parser.add_argument('-vb', "--verbose", type=bool, default=True,
+                       help="是否输出详细信息")
+    # 概念漂移数据集参数
+    parser.add_argument('--use_drift_dataset', action='store_true', 
+                        help='使用概念漂移数据集')
+    parser.add_argument('--drift_data_dir', type=str, default='../dataset/Cifar100_clustered/', 
+                        help='概念漂移数据集目录')
+    parser.add_argument('--max_iterations', type=int, default=200, 
+                        help='概念漂移数据集的最大迭代数')
 
 
     args = parser.parse_args()

@@ -96,7 +96,31 @@ class FedDCA(Server):
         # 新增：默认设置聚类方法为增强型标签条件聚类
         if not hasattr(args, 'clustering_method'):
             self.args.clustering_method = 'enhanced_label'
-            
+        
+        # 概念漂移数据集相关设置
+        self.current_iteration = 0
+        self.max_iterations = args.max_iterations if hasattr(args, 'max_iterations') else 200
+        self.use_drift_dataset = args.use_drift_dataset if hasattr(args, 'use_drift_dataset') else False
+        self.drift_data_dir = args.drift_data_dir if hasattr(args, 'drift_data_dir') else None
+        
+        # 如果启用了概念漂移数据集，加载漂移配置
+        if self.use_drift_dataset and self.drift_data_dir:
+            self.load_drift_config()
+
+        # 确保args中包含必要的聚类参数
+        if not hasattr(args, 'num_clusters'):
+            args.num_clusters = 2  # 默认集群数
+        if not hasattr(args, 'split_threshold'):
+            args.split_threshold = 0.3  # 默认分裂阈值
+        if not hasattr(args, 'merge_threshold'):
+            args.merge_threshold = 0.1  # 默认合并阈值
+        if not hasattr(args, 'kde_samples'):
+            args.kde_samples = 100  # 默认KDE采样数
+        if not hasattr(args, 'proxy_dim'):
+            args.proxy_dim = 128  # 代理特征维度
+        if not hasattr(args, 'sinkhorn_reg'):
+            args.sinkhorn_reg = 0.01  # Sinkhorn 正则化参数
+
         # 概念漂移相关参数设置
         self.drift_threshold = args.drift_threshold if hasattr(args, 'drift_threshold') else 0.1
         self.current_iteration = 0
@@ -113,23 +137,13 @@ class FedDCA(Server):
                 self.drift_data_dir = args.cmd_args.drift_data_dir
             if hasattr(args.cmd_args, 'max_iterations'):
                 self.max_iterations = args.cmd_args.max_iterations
-                
-        # 如果启用了概念漂移数据集，加载漂移配置
-        if self.use_drift_dataset and self.drift_data_dir:
-            self.load_drift_config()        # 确保args中包含必要的聚类参数
-        if not hasattr(args, 'num_clusters'):
-            args.num_clusters = 2  # 默认集群数
-        if not hasattr(args, 'split_threshold'):
-            args.split_threshold = 0.3  # 默认分裂阈值
-        if not hasattr(args, 'merge_threshold'):
-            args.merge_threshold = 0.1  # 默认合并阈值
-        if not hasattr(args, 'kde_samples'):
-            args.kde_samples = 100  # 默认KDE采样数
-        if not hasattr(args, 'proxy_dim'):
-            args.proxy_dim = 128  # 代理特征维度
-        if not hasattr(args, 'sinkhorn_reg'):
-            args.sinkhorn_reg = 0.01  # Sinkhorn 正则化参数
 
+        # 如果启用了概念漂移数据集，加载漂移配置
+        if self.use_drift_dataset:
+            print(f"\n使用概念漂移数据集: {self.drift_data_dir}")
+            print(f"最大迭代次数: {self.max_iterations}")
+            self.load_drift_config()
+            
         # 初始化 VWC 聚类器
         self.vwc = VariationalWassersteinClustering(
             num_clients=args.num_clients,
@@ -139,10 +153,6 @@ class FedDCA(Server):
         )
 
         self.Budget = []  # 用于记录每轮训练的时间成本
-        self.rs_test_acc = []  # 初始化测试准确率列表
-        self.rs_train_loss = []  # 初始化训练损失列表
-        self.rs_test_acc = []  # 初始化测试准确率列表
-        self.rs_train_loss = []  # 初始化训练损失列表
 
     def load_drift_config(self):
         """加载概念漂移数据集的配置信息"""
@@ -290,11 +300,11 @@ class FedDCA(Server):
                                 sampled = kde.resample(num_samples).T
                                 label_conditional_proxy_data[client.id][label] = sampled
                             except Exception as e:
-                                #print(f"KDE处理失败，对客户端{client.id}标签{label}使用原始特征: {str(e)}")
+                                print(f"KDE处理失败，对客户端{client.id}标签{label}使用原始特征: {str(e)}")
                                 # KDE失败，使用原始特征
                                 label_conditional_proxy_data[client.id][label] = features
                         except Exception as kde_error:
-                            #print(f"KDE处理失败，对客户端{client.id}标签{label}使用原始特征: {str(kde_error)}")
+                            print(f"KDE处理失败，对客户端{client.id}标签{label}使用原始特征: {str(kde_error)}")
                             # KDE失败，使用原始特征
                             label_conditional_proxy_data[client.id][label] = features
                     else:
@@ -742,47 +752,47 @@ class FedDCA(Server):
             print(traceback.format_exc())  # 打印详细错误信息
             return copy.deepcopy(models[0])
 
-    # def evaluate(self):
-    #     """评估当前模型性能"""
-    #     stats = {
-    #         'acc_per_client': [],
-    #         'loss_per_client': []
-    #     }
+    def evaluate(self):
+        """评估当前模型性能"""
+        stats = {
+            'acc_per_client': [],
+            'loss_per_client': []
+        }
 
-    #     for client in self.selected_clients:
-    #         try:
-    #             # 使用客户端的测试方法获取性能指标
-    #             test_acc, test_num, _ = client.test_metrics()
-    #             train_loss, train_num = client.train_metrics()
+        for client in self.selected_clients:
+            try:
+                # 使用客户端的测试方法获取性能指标
+                test_acc, test_num, _ = client.test_metrics()
+                train_loss, train_num = client.train_metrics()
                 
-    #             if test_num > 0:
-    #                 stats['acc_per_client'].append(test_acc / test_num)
-    #             if train_num > 0:
-    #                 stats['loss_per_client'].append(train_loss / train_num)
-    #         except Exception as e:
-    #             print(f"Error evaluating client {client.id}: {str(e)}")
-    #             continue
+                if test_num > 0:
+                    stats['acc_per_client'].append(test_acc / test_num)
+                if train_num > 0:
+                    stats['loss_per_client'].append(train_loss / train_num)
+            except Exception as e:
+                print(f"Error evaluating client {client.id}: {str(e)}")
+                continue
 
-    #     # 计算并记录平均性能
-    #     if stats['acc_per_client']:
-    #         avg_acc = np.mean(stats['acc_per_client'])
-    #         self.rs_test_acc.append(avg_acc)
-    #         print(f"Average Test Accuracy: {100*avg_acc:.2f}%")
+        # 计算并记录平均性能
+        if stats['acc_per_client']:
+            avg_acc = np.mean(stats['acc_per_client'])
+            self.rs_test_acc.append(avg_acc)
+            print(f"Average Test Accuracy: {100*avg_acc:.2f}%")
         
-    #     if stats['loss_per_client']:
-    #         avg_loss = np.mean(stats['loss_per_client'])
-    #         print(f"Average Train Loss: {avg_loss:.4f}")
+        if stats['loss_per_client']:
+            avg_loss = np.mean(stats['loss_per_client'])
+            print(f"Average Train Loss: {avg_loss:.4f}")
 
-    #     # 记录集群信息
-    #     cluster_stats = {}
-    #     for client_id, cluster_id in self.clusters.items():
-    #         if cluster_id not in cluster_stats:
-    #             cluster_stats[cluster_id] = {'count': 0}
-    #         cluster_stats[cluster_id]['count'] += 1
+        # 记录集群信息
+        cluster_stats = {}
+        for client_id, cluster_id in self.clusters.items():
+            if cluster_id not in cluster_stats:
+                cluster_stats[cluster_id] = {'count': 0}
+            cluster_stats[cluster_id]['count'] += 1
 
-    #     print("\nCluster Distribution:")
-    #     for cluster_id, stats in cluster_stats.items():
-    #         print(f"Cluster {cluster_id}: {stats['count']} clients")
+        print("\nCluster Distribution:")
+        for cluster_id, stats in cluster_stats.items():
+            print(f"Cluster {cluster_id}: {stats['count']} clients")
 
     @plot_metrics()
     def train(self):
@@ -935,20 +945,14 @@ class FedDCA(Server):
                 print(f"\nError in training round {i}: {str(e)}")
                 continue            # 检查是否达到停止条件
             if self.auto_break and self.check_done(
-                acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt            ):
+                acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt
+            ):
                 print("\nReached stopping criterion. Training complete.")
                 break
 
         print("\nTraining completed!")
-        if self.rs_test_acc:
-            print("Best accuracy achieved:", max(self.rs_test_acc))
-        else:
-            print("Warning: No test accuracy records found")
-        if len(self.Budget) > 1:
-            print("Average time cost per round:", sum(self.Budget[1:]) / len(self.Budget[1:]))
-        else:
-            print("Warning: No time cost records found")
-        # 评估最终聚类性能
+        print("Best accuracy achieved:", max(self.rs_test_acc))
+        print("Average time cost per round:", sum(self.Budget[1:]) / len(self.Budget[1:]))        # 评估最终聚类性能
         print("\n执行最终聚类性能评估...")
         self.evaluate_clustering_metrics()
         
@@ -979,29 +983,6 @@ class FedDCA(Server):
             torch.save(self.autoencoder.state_dict(), 
                       os.path.join("saved_models", "FedDCA_server_autoencoder.pt"))
 
-    def save_models(self):
-        """保存全局模型和各个聚类中心模型"""
-        # 创建保存目录
-        if not os.path.exists("saved_models"):
-            os.makedirs("saved_models")
-            
-        # 保存全局模型
-        torch.save(self.global_model.state_dict(), 
-                  os.path.join("saved_models", f"FedDCA_global_{self.dataset}.pt"))
-        
-        # 保存每个聚类中心模型
-        for cluster_id, model in self.cluster_centroids.items():
-            torch.save(model.state_dict(), 
-                      os.path.join("saved_models", f"FedDCA_cluster_{cluster_id}_{self.dataset}.pt"))
-        
-        print(f"模型保存完成：1个全局模型和{len(self.cluster_centroids)}个聚类中心模型")
-        
-        # 如果有自动编码器，也保存它
-        if hasattr(self, "autoencoder"):
-            torch.save(self.autoencoder.state_dict(), 
-                      os.path.join("saved_models", f"FedDCA_autoencoder_{self.dataset}.pt"))
-            print("自动编码器模型已保存")
-
     def visualize_clustering(self, i):
         """可视化聚类结果
         
@@ -1012,7 +993,8 @@ class FedDCA(Server):
             print("没有足够的数据进行聚类可视化")
             return
             
-        try:            # 收集所有客户端特征和聚类标签
+        try:
+            # 收集所有客户端特征和聚类标签
             features = []
             cluster_labels = []
             client_ids = []
@@ -1024,35 +1006,17 @@ class FedDCA(Server):
             for client in self.selected_clients:
                 if hasattr(client, 'intermediate_output') and client.intermediate_output is not None:
                     feat = client.intermediate_output
-                    
-                    # 打印原始特征的类型和形状，辅助调试
-                    # print(f"客户端 {client.id} 原始特征: 类型={type(feat)}, 形状={feat.shape if hasattr(feat, 'shape') else '标量'}")
-                    
                     if not isinstance(feat, torch.Tensor):
                         feat = torch.tensor(feat)
                     
                     # 将特征转换为CPU和Numpy格式
                     feat = feat.detach().cpu().numpy()
                     
-                    # 检查特征的维度
+                    # 如果特征是多维的，先平均降到2D
                     if len(feat.shape) > 1:
-                        # 如果是2D以上的张量，取平均值降为1D向量
                         feat = np.mean(feat, axis=0)
-                        #print(f"客户端 {client.id} 降维后特征形状: {feat.shape}")
-                    
-                    # 确保特征是一维数组，便于后续处理
-                    if len(feat.shape) == 0:
-                        # 标量转为一元数组
-                        feat = np.array([float(feat)])
-                        #print(f"客户端 {client.id} 标量特征转换为数组: {feat}")
-                    
-                    # 确保特征不包含无效值(NaN或Inf)
-                    if np.isnan(feat).any() or np.isinf(feat).any():
-                        #print(f"警告: 客户端 {client.id} 特征包含无效值，将被替换为0")
-                        feat = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
                     
                     features.append(feat)
-                    #print(f"客户端 {client.id} 最终特征形状: {feat.shape}")
                     cluster_labels.append(self.clusters.get(client.id, 0))
                     client_ids.append(client.id)
                     
@@ -1077,10 +1041,10 @@ class FedDCA(Server):
             # 创建结果目录
             if not os.path.exists('results/clustering'):
                 os.makedirs('results/clustering')
-                  # 设置绘图
+                
+            # 设置绘图
             plt.figure(figsize=(12, 10))
-            
-            # 使用t-SNE将特征降至2维
+              # 使用t-SNE将特征降至2维
             print("执行t-SNE降维...")
             # 根据样本数动态调整perplexity参数，避免"perplexity must be less than n_samples"错误
             n_samples = len(features)
@@ -1097,10 +1061,11 @@ class FedDCA(Server):
             # 绘制聚类结果
             plt.subplot(2, 2, 1)
             scatter = plt.scatter(features_2d[:, 0], features_2d[:, 1], c=cluster_labels, cmap='tab10', alpha=0.7, s=50)
-            plt.title(f'Clustering Results (Round {i}, {len(set(cluster_labels))} clusters)')
-            plt.colorbar(scatter, label='Cluster ID')
-            plt.xlabel('t-SNE Feature 1')
-            plt.ylabel('t-SNE Feature 2')
+            plt.title(f'聚类结果 (轮次 {i}, {len(set(cluster_labels))} 个簇)')
+            plt.colorbar(scatter, label='簇编号')
+            plt.xlabel('t-SNE 特征 1')
+            plt.ylabel('t-SNE 特征 2')
+            
             # 为每个点添加客户端ID标签
             for j, client_id in enumerate(client_ids):
                 plt.annotate(str(client_id), (features_2d[j, 0], features_2d[j, 1]), fontsize=8)
@@ -1110,10 +1075,10 @@ class FedDCA(Server):
                 plt.subplot(2, 2, 2)
                 true_labels = np.array(true_labels)
                 scatter = plt.scatter(features_2d[:, 0], features_2d[:, 1], c=true_labels, cmap='tab10', alpha=0.7, s=50)
-                plt.title(f'True Concept Distribution ({len(set(true_labels))} concepts)')
-                plt.colorbar(scatter, label='Concept ID')
-                plt.xlabel('t-SNE Feature 1')
-                plt.ylabel('t-SNE Feature 2')
+                plt.title(f'真实概念分布 ({len(set(true_labels))} 个概念)')
+                plt.colorbar(scatter, label='概念编号')
+                plt.xlabel('t-SNE 特征 1')
+                plt.ylabel('t-SNE 特征 2')
                 
                 # 计算聚类准确性指标
                 # 删除未知标签
@@ -1124,46 +1089,47 @@ class FedDCA(Server):
                     
                     # 计算调整兰德指数 (ARI)
                     ari = adjusted_rand_score(valid_true_labels, valid_cluster_labels)
+                    
                     # 添加ARI分数文本标签
-                    plt.subplot(2, 2, 3)
-                    plt.annotate(f'Adjusted Rand Index (ARI): {ari:.4f}', 
+                    plt.subplot(2, 2, 1)
+                    plt.annotate(f'调整兰德指数 (ARI): {ari:.4f}', 
                                 xy=(0.05, 0.95), 
                                 xycoords='axes fraction',
                                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
-            
-            # 计算并绘制轮廓系数
+              # 计算并绘制轮廓系数
             if len(set(cluster_labels)) > 1 and len(features) > len(set(cluster_labels)):
                 try:
                     # 计算额外的评估指标
-                    print("Calculating clustering evaluation metrics...")
+                    print("计算聚类评估指标...")
                     metrics = self.calculate_additional_metrics(features, cluster_labels)
                     
                     # 绘制评估指标
-                    plt.subplot(2, 2, 4)
+                    plt.subplot(2, 2, 3)
                     metrics_names = []
                     metrics_values = []
                     
                     if 'silhouette_score' in metrics:
-                        metrics_names.append('Silhouette\nCoefficient')
+                        metrics_names.append('轮廓系数')
                         metrics_values.append(metrics['silhouette_score'])
                     
                     if 'davies_bouldin_score' in metrics:
                         # 为了统一显示方向（越大越好），取Davies-Bouldin的负值
-                        metrics_names.append('Davies-Bouldin\n(negative)')
+                        metrics_names.append('Davies-Bouldin\n(负值)')
                         metrics_values.append(-metrics['davies_bouldin_score'])
                     
                     if 'calinski_harabasz_score' in metrics:
                         # 归一化Calinski-Harabasz分数，因为它通常很大
                         normalized_ch = min(1.0, metrics['calinski_harabasz_score'] / 10000)
-                        metrics_names.append('Calinski-Harabasz\n(normalized)')
+                        metrics_names.append('Calinski-Harabasz\n(归一化)')
                         metrics_values.append(normalized_ch)
-                      # 绘制指标柱状图
+                    
+                    # 绘制指标柱状图
                     if metrics_values:
                         bar_colors = ['skyblue', 'salmon', 'lightgreen'][:len(metrics_values)]
                         plt.bar(range(len(metrics_values)), metrics_values, color=bar_colors)
-                        plt.title(f'Clustering Evaluation Metrics')
+                        plt.title(f'聚类评估指标')
                         plt.xticks(range(len(metrics_values)), metrics_names)
-                        plt.ylabel('Score Value')
+                        plt.ylabel('评分值')
                         plt.ylim(-1, 1)  # 统一刻度
                         
                         # 添加数值标签
@@ -1175,24 +1141,26 @@ class FedDCA(Server):
                                         ha='center')
                     
                 except Exception as e:
-                    print(f"Error plotting evaluation metrics: {str(e)}")
+                    print(f"绘制评估指标时出错: {str(e)}")
                     # 如果绘制失败，回退到只显示轮廓系数
                     try:
                         silhouette_avg = silhouette_score(features, cluster_labels)
-                        plt.subplot(2, 2, 4)
+                        plt.subplot(2, 2, 3)
                         plt.bar(range(1), [silhouette_avg], color='skyblue')
-                        plt.title(f'Silhouette Coefficient: {silhouette_avg:.4f}')
+                        plt.title(f'轮廓系数: {silhouette_avg:.4f}')
                         plt.xticks([])
-                        plt.ylabel('Silhouette Score')
+                        plt.ylabel('轮廓系数值')
                         plt.ylim(-1, 1)
                         # 添加评估文本
-                        quality_text = 'Poor' if silhouette_avg < 0.2 else 'Fair' if silhouette_avg < 0.5 else 'Good' if silhouette_avg < 0.7 else 'Excellent'
-                        plt.annotate(f'Clustering Quality: {quality_text}', 
+                        quality_text = '差' if silhouette_avg < 0.2 else '一般' if silhouette_avg < 0.5 else '良好' if silhouette_avg < 0.7 else '优秀'
+                        plt.annotate(f'聚类质量: {quality_text}', 
                                     xy=(0.1, 0.5), 
                                     xycoords='axes fraction',
                                     fontsize=12)
                     except Exception as e:
-                        print(f"Error calculating silhouette coefficient: {str(e)}")            # 绘制聚类分布柱状图
+                        print(f"计算轮廓系数时出错: {str(e)}")
+            
+            # 绘制聚类分布柱状图
             plt.subplot(2, 2, 4)
             cluster_counts = {}
             for cluster in cluster_labels:
@@ -1204,23 +1172,23 @@ class FedDCA(Server):
             counts = [cluster_counts[c] for c in clusters]
             
             plt.bar(clusters, counts, color='salmon')
-            plt.title(f'Cluster Distribution (Round {i})')
-            plt.xlabel('Cluster ID')
-            plt.ylabel('Client Count')
+            plt.title(f'簇分布 (轮次 {i})')
+            plt.xlabel('簇编号')
+            plt.ylabel('客户端数量')
             
             # 添加数量标签
             for j, count in enumerate(counts):
-                plt.annotate(str(count),
-                             xy=(clusters[j], count),
-                             xytext=(0, 3),
-                             textcoords="offset points",
-                             ha='center')
+                plt.annotate(str(count), 
+                            xy=(clusters[j], count), 
+                            xytext=(0, 3),
+                            textcoords="offset points",
+                            ha='center')
             
             # 保存图表
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             plt.tight_layout()
             plt.savefig(f'results/clustering/clustering_round_{i}_{timestamp}.png', dpi=300)
-            print(f"Clustering visualization saved to 'results/clustering/clustering_round_{i}_{timestamp}.png'")
+            print(f"聚类可视化已保存至 'results/clustering/clustering_round_{i}_{timestamp}.png'")
             plt.close()
             
             # 如果存在历史聚类分配，绘制聚类稳定性图
@@ -1237,38 +1205,41 @@ class FedDCA(Server):
                     
                     for cid in selected_clients:
                         history = self.client_cluster_history[cid][-min(i+1, 10):]  # 最近10轮
-                        plt.plot(range(len(history)), history, 'o-', label=f'Client {cid}')
+                        plt.plot(range(len(history)), history, 'o-', label=f'客户端 {cid}')
                     
-                    plt.title('Client Clustering Stability Analysis')
-                    plt.xlabel('Round (Last 10 rounds)')
-                    plt.ylabel('Cluster Assignment')
+                    plt.title('客户端聚类稳定性分析')
+                    plt.xlabel('轮次 (最近10轮)')
+                    plt.ylabel('簇分配')
                     plt.legend(loc='best')
                     plt.grid(True)
+                    
                     plt.savefig(f'results/clustering/cluster_stability_{i}_{timestamp}.png', dpi=300)
-                    print(f"Clustering stability graph saved to 'results/clustering/cluster_stability_{i}_{timestamp}.png'")
+                    print(f"聚类稳定性图已保存至 'results/clustering/cluster_stability_{i}_{timestamp}.png'")
                     plt.close()
+        
         except Exception as e:
-            print(f"Error during clustering visualization: {str(e)}")
+            print(f"聚类可视化过程出错: {str(e)}")
             print(traceback.format_exc())
 
     def evaluate_clustering_metrics(self):
-        """Evaluate clustering performance metrics and generate summary report"""
+        """评估聚类性能指标并生成总结报告"""
         if not hasattr(self, 'clusters') or len(self.clusters) == 0:
-            print("No clustering data available for evaluation")
+            print("没有聚类数据可供评估")
             return
-
+            
         try:
-            print("\n======= Clustering Performance Evaluation =======")
-              # 1. 簇分布情况
+            print("\n======= 聚类性能评估 =======")
+            
+            # 1. 簇分布情况
             cluster_distribution = {}
             for client_id, cluster_id in self.clusters.items():
                 if cluster_id not in cluster_distribution:
                     cluster_distribution[cluster_id] = 0
                 cluster_distribution[cluster_id] += 1
-            
-            print("\nCluster Distribution:")
+                
+            print("\n簇分布:")
             for cluster_id, count in sorted(cluster_distribution.items()):
-                print(f"  Cluster {cluster_id}: {count} clients ({count/len(self.clusters)*100:.1f}%)")
+                print(f"  簇 {cluster_id}: {count} 个客户端 ({count/len(self.clusters)*100:.1f}%)")
                 
             # 2. 聚类稳定性 - 计算最近几轮的平均变化率
             if hasattr(self, 'client_cluster_history') and len(self.client_cluster_history) > 0:
@@ -1284,13 +1255,14 @@ class FedDCA(Server):
                 
                 if changes:
                     avg_change_rate = sum(changes) / len(changes)
-                    print(f"\nClustering Stability:")
-                    print(f"  Average Cluster Change Rate: {avg_change_rate:.2f} (0=completely stable, 1=changes every round)")
-                    stability_level = 'Very High' if avg_change_rate < 0.1 else 'High' if avg_change_rate < 0.3 else 'Medium' if avg_change_rate < 0.5 else 'Low'
-                    print(f"  Stability Level: {stability_level}")
-              # 3. 概念对齐分析 (如果有真实概念标签)
+                    print(f"\n聚类稳定性:")
+                    print(f"  平均簇变化率: {avg_change_rate:.2f} (0=完全稳定, 1=每轮变化)")
+                    stability_level = '极高' if avg_change_rate < 0.1 else '高' if avg_change_rate < 0.3 else '中等' if avg_change_rate < 0.5 else '低'
+                    print(f"  稳定性级别: {stability_level}")
+            
+            # 3. 概念对齐分析 (如果有真实概念标签)
             if self.use_drift_dataset and hasattr(self, 'client_concepts'):
-                print("\nConcept-Cluster Alignment Analysis:")
+                print("\n概念-聚类对齐分析:")
                 
                 concept_cluster_map = {}  # 映射概念到集群分布
                 cluster_concept_map = {}  # 映射集群到概念分布
@@ -1324,20 +1296,21 @@ class FedDCA(Server):
                 for concept, clusters in concept_cluster_map.items():
                     primary_cluster = max(clusters, key=clusters.get)
                     concept_primary_clusters[concept] = primary_cluster
-                    print(f"  Concept {concept} primarily maps to Cluster {primary_cluster} ({clusters[primary_cluster]/sum(clusters.values())*100:.1f}%)")
+                    print(f"  概念 {concept} 主要对应到簇 {primary_cluster} ({clusters[primary_cluster]/sum(clusters.values())*100:.1f}%)")
                     
                     # 计算该概念的客户端被正确分类的比例
                     correct_assignments = clusters[primary_cluster]
                     total_concept_clients = sum(clusters.values())
                     alignments += correct_assignments
-                    print(f"    Alignment Rate: {correct_assignments/total_concept_clients*100:.1f}%")
+                    print(f"    对齐率: {correct_assignments/total_concept_clients*100:.1f}%")
                 
                 # 计算总体对齐率
                 overall_alignment = alignments / total if total > 0 else 0
-                print(f"\nOverall Concept-Cluster Alignment Rate: {overall_alignment*100:.1f}%")
-                alignment_quality = 'Excellent' if overall_alignment > 0.8 else 'Good' if overall_alignment > 0.6 else 'Fair' if overall_alignment > 0.4 else 'Poor'
-                print(f"Alignment Quality: {alignment_quality}")
-                  # 绘制概念-聚类对齐热力图
+                print(f"\n总体概念-聚类对齐率: {overall_alignment*100:.1f}%")
+                alignment_quality = '优秀' if overall_alignment > 0.8 else '良好' if overall_alignment > 0.6 else '一般' if overall_alignment > 0.4 else '较差'
+                print(f"对齐质量: {alignment_quality}")
+                
+                # 绘制概念-聚类对齐热力图
                 if concept_cluster_map and cluster_concept_map:
                     plt.figure(figsize=(10, 8))
                     
@@ -1356,10 +1329,10 @@ class FedDCA(Server):
                     
                     # 绘制热力图
                     plt.imshow(alignment_matrix, cmap='YlOrRd')
-                    plt.colorbar(label='Concept to Cluster Assignment Ratio')
-                    plt.xticks(range(len(clusters)), [f'Cluster {c}' for c in clusters], rotation=45)
-                    plt.yticks(range(len(concepts)), [f'Concept {c}' for c in concepts])
-                    plt.title('Concept-Cluster Alignment Heatmap')
+                    plt.colorbar(label='概念到集群的分配比例')
+                    plt.xticks(range(len(clusters)), [f'簇 {c}' for c in clusters], rotation=45)
+                    plt.yticks(range(len(concepts)), [f'概念 {c}' for c in concepts])
+                    plt.title('概念-聚类对齐热力图')
                     
                     for i in range(len(concepts)):
                         for j in range(len(clusters)):
@@ -1373,10 +1346,11 @@ class FedDCA(Server):
                     if not os.path.exists('results/clustering'):
                         os.makedirs('results/clustering')
                     plt.savefig(f'results/clustering/concept_cluster_alignment_{timestamp}.png', dpi=300)
-                    print(f"\nConcept-Cluster alignment heatmap saved to 'results/clustering/concept_cluster_alignment_{timestamp}.png'")
+                    print(f"\n概念-聚类对齐热力图已保存至 'results/clustering/concept_cluster_alignment_{timestamp}.png'")
                     plt.close()
-              # 4. 跨集群性能比较
-            print("\nCross-Cluster Performance Comparison:")
+            
+            # 4. 跨集群性能比较
+            print("\n跨集群性能比较:")
             cluster_performance = {}
             
             for client in self.selected_clients:
@@ -1394,7 +1368,7 @@ class FedDCA(Server):
                     if train_num > 0:
                         cluster_performance[cluster_id]['loss'].append(train_loss / train_num)
                 except Exception as e:
-                    print(f"Failed to get performance metrics from client {client.id}: {str(e)}")
+                    print(f"获取客户端 {client.id} 性能指标失败: {str(e)}")
             
             # 计算并显示每个集群的平均性能
             for cluster_id, metrics in sorted(cluster_performance.items()):
@@ -1402,9 +1376,9 @@ class FedDCA(Server):
                 avg_loss = np.mean(metrics['loss']) if metrics['loss'] else 0
                 client_count = len(metrics['acc'])
                 
-                print(f"  Cluster {cluster_id} ({client_count} clients):")
-                print(f"    Average Accuracy: {avg_acc*100:.2f}%")
-                print(f"    Average Loss: {avg_loss:.4f}")
+                print(f"  簇 {cluster_id} ({client_count} 个客户端):")
+                print(f"    平均准确率: {avg_acc*100:.2f}%")
+                print(f"    平均损失: {avg_loss:.4f}")
             
             # 绘制集群性能对比图
             plt.figure(figsize=(12, 5))
@@ -1427,9 +1401,9 @@ class FedDCA(Server):
             
             if clusters:
                 plt.bar(range(len(clusters)), accuracies, yerr=std_devs, capsize=5, alpha=0.7, color='skyblue')
-                plt.xticks(range(len(clusters)), [f'Cluster {c}\n({counts[i]})' for i, c in enumerate(clusters)])
-                plt.title('Cluster Accuracy Comparison')
-                plt.ylabel('Accuracy')
+                plt.xticks(range(len(clusters)), [f'簇 {c}\n({counts[i]})' for i, c in enumerate(clusters)])
+                plt.title('各簇准确率对比')
+                plt.ylabel('准确率')
                 plt.grid(axis='y', linestyle='--', alpha=0.7)
                 
                 # 添加具体数值
@@ -1453,9 +1427,9 @@ class FedDCA(Server):
                         counts.append(len(metrics['loss']))
                 
                 plt.bar(range(len(clusters)), losses, yerr=std_devs, capsize=5, alpha=0.7, color='salmon')
-                plt.xticks(range(len(clusters)), [f'Cluster {c}\n({counts[i]})' for i, c in enumerate(clusters)])
-                plt.title('Cluster Loss Comparison')
-                plt.ylabel('Loss')
+                plt.xticks(range(len(clusters)), [f'簇 {c}\n({counts[i]})' for i, c in enumerate(clusters)])
+                plt.title('各簇损失对比')
+                plt.ylabel('损失')
                 plt.grid(axis='y', linestyle='--', alpha=0.7)
                 
                 # 添加具体数值
@@ -1467,16 +1441,17 @@ class FedDCA(Server):
                 if not os.path.exists('results/clustering'):
                     os.makedirs('results/clustering')
                 plt.savefig(f'results/clustering/cluster_performance_comparison_{timestamp}.png', dpi=300)
-                print(f"\nCluster performance comparison chart saved to 'results/clustering/cluster_performance_comparison_{timestamp}.png'")
+                print(f"\n集群性能对比图已保存至 'results/clustering/cluster_performance_comparison_{timestamp}.png'")
                 plt.close()
                 
-            print("\n======= Clustering Evaluation Completed =======")
-        except Exception as e:
-            print(f"Error evaluating clustering metrics: {str(e)}")
-            print(traceback.format_exc())
+            print("\n======= 聚类评估完成 =======")
             
+        except Exception as e:
+            print(f"评估聚类指标时出错: {str(e)}")
+            print(traceback.format_exc())
+
     def save_clustering_results(self):
-        """Save clustering results to files"""
+        """保存聚类结果到文件"""
         try:
             if not os.path.exists('results/clustering'):
                 os.makedirs('results/clustering')
@@ -1497,7 +1472,8 @@ class FedDCA(Server):
                 history_data[str(client_id)] = [int(x) for x in history]
             
             with open('results/clustering/cluster_history.json', 'w') as f:
-                json.dump(history_data, f, indent=4)                  # 如果有真实概念标签，进行概念-聚类映射分析
+                json.dump(history_data, f, indent=4)
+                  # 如果有真实概念标签，进行概念-聚类映射分析
             if self.use_drift_dataset and hasattr(self, 'client_concepts'):
                 # 计算概念和聚类的对应关系
                 concept_cluster_map = {}
@@ -1555,26 +1531,28 @@ class FedDCA(Server):
                         
                         # 保存所有评估指标
                         with open('results/clustering/clustering_metrics.txt', 'w') as f:
-                            f.write(f"Adjusted Rand Index (ARI): {ari:.4f}\n")
+                            f.write(f"调整兰德指数 (ARI): {ari:.4f}\n")
                             for metric_name, metric_value in extra_metrics.items():
                                 f.write(f"{metric_name}: {metric_value:.4f}\n")
                             
-                        print(f"Final clustering Adjusted Rand Index (ARI): {ari:.4f}")
+                        print(f"最终聚类的调整兰德指数 (ARI): {ari:.4f}")
                 except Exception as e:
-                    print(f"Error calculating clustering metrics: {str(e)}")
-            print("Clustering results saved to 'results/clustering/' directory")
-        except Exception as e:
-            print(f"Error saving clustering results: {str(e)}")
-            print(traceback.format_exc())
+                    print(f"计算聚类指标时出错: {str(e)}")
             
+            print("聚类结果已保存到 'results/clustering/' 目录")
+        
+        except Exception as e:
+            print(f"保存聚类结果时出错: {str(e)}")
+            print(traceback.format_exc())
+
     def plot_clustering_evolution(self, save_path='results/clustering/clustering_evolution.png'):
-        """Plot the evolution of clustering over time
+        """绘制聚类随时间演变的趋势
         
         Args:
-            save_path: Path to save the chart
+            save_path: 保存图表的路径
         """
         if not hasattr(self, 'client_cluster_history') or len(self.client_cluster_history) == 0:
-            print("Not enough clustering history data for visualization")
+            print("没有足够的聚类历史数据可视化")
             return
             
         try:
@@ -1614,15 +1592,16 @@ class FedDCA(Server):
                     change_rates.append(change_rate)
                     cluster_counts.append(len(round_stats[i]['cluster_counts']))
                     rounds.append(i)
-              # 创建图表
+            
+            # 创建图表
             plt.figure(figsize=(12, 8))
             
             # 绘制变化率
             plt.subplot(2, 1, 1)
-            plt.plot(rounds, change_rates, 'o-', color='blue', label='Change Rate')
-            plt.title('Evolution of Clustering Change Rate')
-            plt.xlabel('Round')
-            plt.ylabel('Change Rate')
+            plt.plot(rounds, change_rates, 'o-', color='blue', label='变化率')
+            plt.title('聚类变化率随轮次的演变')
+            plt.xlabel('轮次')
+            plt.ylabel('变化率')
             plt.grid(True, linestyle='--', alpha=0.7)
             plt.legend()
             
@@ -1635,12 +1614,13 @@ class FedDCA(Server):
                                 xytext=(rounds[i], rate + 0.05),
                                 arrowprops=dict(arrowstyle="->", color='red'),
                                 ha='center')
-              # 绘制聚类数量
+            
+            # 绘制聚类数量
             plt.subplot(2, 1, 2)
-            plt.plot(rounds, cluster_counts, 'o-', color='green', label='Cluster Count')
-            plt.title('Evolution of Active Cluster Count')
-            plt.xlabel('Round')
-            plt.ylabel('Active Cluster Count')
+            plt.plot(rounds, cluster_counts, 'o-', color='green', label='簇数量')
+            plt.title('活跃簇数量随轮次的演变')
+            plt.xlabel('轮次')
+            plt.ylabel('活跃簇数量')
             plt.grid(True, linestyle='--', alpha=0.7)
             plt.legend()
             
@@ -1658,9 +1638,10 @@ class FedDCA(Server):
             if not os.path.exists(os.path.dirname(save_path)):
                 os.makedirs(os.path.dirname(save_path))
             plt.savefig(save_path, dpi=300)
-            print(f"Clustering evolution chart saved to '{save_path}'")
+            print(f"聚类演变图已保存至 '{save_path}'")
             plt.close()
-              # 绘制客户端聚类轨迹图
+            
+            # 绘制客户端聚类轨迹图
             plt.figure(figsize=(14, 10))
             
             # 选择一部分有代表性的客户端进行可视化
@@ -1671,11 +1652,11 @@ class FedDCA(Server):
             # 为每个选择的客户端绘制聚类轨迹
             for client_id in selected_clients:
                 history = self.client_cluster_history[client_id]
-                plt.plot(range(len(history)), history, '-', label=f'Client {client_id}')
+                plt.plot(range(len(history)), history, '-', label=f'客户端 {client_id}')
             
-            plt.title('Client Clustering Trajectory Evolution')
-            plt.xlabel('Round')
-            plt.ylabel('Cluster Assignment')
+            plt.title('客户端聚类轨迹演变')
+            plt.xlabel('轮次')
+            plt.ylabel('簇分配')
             plt.grid(True, linestyle='--', alpha=0.7)
             
             # 设置y轴刻度为整数
@@ -1686,23 +1667,24 @@ class FedDCA(Server):
                 plt.legend(loc='best')
             
             # 保存轨迹图
-            trajectory_path = os.path.join(os.path.dirname(save_path), 'client_trajectories.png')            
+            trajectory_path = os.path.join(os.path.dirname(save_path), 'client_trajectories.png')
             plt.savefig(trajectory_path, dpi=300)
-            print(f"Client clustering trajectory chart saved to '{trajectory_path}'")
+            print(f"客户端聚类轨迹图已保存至 '{trajectory_path}'")
             plt.close()
-        except Exception as e:
-            print(f"Error plotting clustering evolution: {str(e)}")
-            print(traceback.format_exc())
             
+        except Exception as e:
+            print(f"绘制聚类演变图时出错: {str(e)}")
+            print(traceback.format_exc())
+
     def calculate_additional_metrics(self, features, cluster_labels):
-        """Calculate additional clustering evaluation metrics
+        """计算额外的聚类评估指标
         
         Args:
-            features: Feature data with shape (n_samples, n_features)
-            cluster_labels: Cluster labels with shape (n_samples,)
+            features: 特征数据，形状为 (n_samples, n_features)
+            cluster_labels: 聚类标签，形状为 (n_samples,)
             
         Returns:
-            dict: Dictionary containing various clustering evaluation metrics
+            dict: 包含各种聚类评估指标的字典
         """
         # 初始化结果字典
         metrics = {}
@@ -1710,12 +1692,13 @@ class FedDCA(Server):
         try:
             # 检查是否满足计算指标的条件
             if len(set(cluster_labels)) < 2:
-                print("Less than 2 clusters, cannot calculate evaluation metrics")
+                print("聚类数少于2，无法计算评估指标")
                 return metrics
                 
             if len(features) <= len(set(cluster_labels)):
-                print("Not enough samples to reliably calculate evaluation metrics")
-                return metrics                
+                print("样本数不足，无法可靠计算评估指标")
+                return metrics
+                
             # 计算轮廓系数 (Silhouette Coefficient)
             # 衡量样本与自己所在簇的相似度与其他簇的不相似度
             # 范围：[-1, 1]，越接近1越好
@@ -1748,7 +1731,8 @@ class FedDCA(Server):
                             true_labels.append(self.client_concepts[str(client_id)][0])
                         else:
                             true_labels.append(-1)
-                      # 过滤掉未知标签
+                    
+                    # 过滤掉未知标签
                     valid_indices = [i for i, label in enumerate(true_labels) if label != -1]
                     
                     if len(valid_indices) >= 2 and len(set([true_labels[i] for i in valid_indices])) >= 2:
@@ -1762,12 +1746,12 @@ class FedDCA(Server):
                         metrics['adjusted_rand_score'] = ari
                 
                 except Exception as label_error:
-                    print(f"Error calculating label consistency metrics: {str(label_error)}")
+                    print(f"计算标签一致性指标时出错: {str(label_error)}")
             
                 return metrics
             
         except Exception as metric_error:
-            print(f"Error calculating additional metrics: {str(metric_error)}")
+            print(f"计算额外指标时出错: {str(metric_error)}")
             return metrics
             
     def compute_label_conditional_wasserstein_distance(self, client_features):

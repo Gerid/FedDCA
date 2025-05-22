@@ -1,7 +1,6 @@
 import os
 import ujson
 import numpy as np
-import gc
 from sklearn.model_selection import train_test_split
 
 batch_size = 10
@@ -13,7 +12,7 @@ def check(config_path, train_path, test_path, num_clients, num_classes, niid=Fal
         balance=True, partition=None):
     # check existing dataset
     if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = ujson.load(f)
         if config['num_clients'] == num_clients and \
             config['num_classes'] == num_classes and \
@@ -113,11 +112,10 @@ def separate_data(data, num_clients, num_classes, niid=False, balance=False, par
             
 
     del data
-    # gc.collect()
 
     for client in range(num_clients):
         print(f"Client {client}\t Size of data: {len(X[client])}\t Labels: ", np.unique(y[client]))
-        print(f"\t\t Samples of labels: ", [i for i in statistic[client]])
+        print("\t\t Samples of labels:", [i for i in statistic[client]])
         print("-" * 50)
 
     return X, y, statistic
@@ -142,7 +140,6 @@ def split_data(X, y):
     print("The number of test samples:", num_samples['test'])
     print()
     del X, y
-    # gc.collect()
 
     return train_data, test_data
 
@@ -155,20 +152,41 @@ def save_file(config_path, train_path, test_path, train_data, test_data, num_cli
         'balance': balance, 
         'partition': partition, 
         'Size of samples for labels in clients': statistic, 
-        'alpha': alpha, 
-        'batch_size': batch_size, 
     }
 
-    # gc.collect()
     print("Saving to disk.\n")
 
-    for idx, train_dict in enumerate(train_data):
-        with open(train_path + str(idx) + '.npz', 'wb') as f:
-            np.savez_compressed(f, data=train_dict)
-    for idx, test_dict in enumerate(test_data):
-        with open(test_path + str(idx) + '.npz', 'wb') as f:
-            np.savez_compressed(f, data=test_dict)
-    with open(config_path, 'w') as f:
+    # 检查train_data是字典还是列表
+    if isinstance(train_data, dict):
+        # 字典情况：键是客户端ID，值是包含'x'和'y'的字典
+        for client_id, client_data in train_data.items():
+            print(f"调试: 客户端 {client_id} 的 train_data 结构: {client_data}")
+            with open(train_path + str(client_id) + '.npz', 'wb') as f:
+                # 直接保存x和y数组到npz
+                np.savez_compressed(f, x=client_data['x'], y=client_data['y'])
+    else:
+        # 列表情况：索引是客户端ID，值可能是包含'x'和'y'的字典或者其他结构
+        for idx, train_dict in enumerate(train_data):
+            print(f"调试: train_dict 结构: {train_dict}")
+            with open(train_path + str(idx) + '.npz', 'wb') as f:
+                # 直接保存x和y数组到npz，避免只有data键
+                np.savez_compressed(f, x=train_dict['x'], y=train_dict['y'])
+      # 检查test_data是字典还是列表
+    if isinstance(test_data, dict):
+        # 字典情况：键是客户端ID，值是包含'x'和'y'的字典
+        for client_id, client_data in test_data.items():
+            print(f"调试: 客户端 {client_id} 的 test_data 结构: {client_data}")
+            with open(test_path + str(client_id) + '.npz', 'wb') as f:
+                # 直接保存x和y数组到npz
+                np.savez_compressed(f, x=client_data['x'], y=client_data['y'])
+    else:
+        # 列表情况：索引是客户端ID，值可能是包含'x'和'y'的字典或者其他结构
+        for idx, test_dict in enumerate(test_data):
+            print(f"调试: test_dict 结构: {test_dict}")
+            with open(test_path + str(idx) + '.npz', 'wb') as f:
+                np.savez_compressed(f, x=test_dict['x'], y=test_dict['y'])
+    
+    with open(config_path, 'w', encoding='utf-8') as f:
         ujson.dump(config, f)
 
     print("Finish generating dataset.\n")

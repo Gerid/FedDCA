@@ -42,6 +42,9 @@
                 "10",
                 "-nc",
                 "20",
+                "--clustering_method",
+                "label_conditional",
+                "--use_drift_dataset"
             ]
         }
     ]

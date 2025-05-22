@@ -22,6 +22,7 @@ class FedAvg(Server):
     def train(self):
         for i in range(self.global_rounds+1):
             s_t = time.time()
+
             self.selected_clients = self.select_clients()
             self.send_models()
 
@@ -31,6 +32,7 @@ class FedAvg(Server):
                 self.evaluate()
 
             for client in self.selected_clients:
+                client.current_iteration = i
                 client.train()
 
             # threads = [Thread(target=client.train)
