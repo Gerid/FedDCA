@@ -6,6 +6,8 @@ import traceback
 import json
 from flcore.clients.clientdca import clientDCA
 from flcore.servers.serverbase import Server
+from flcore.servers.serverdca_concepts import initialize_shared_concepts, distribute_concepts_to_clients, save_concept_progress, analyze_concept_alignment
+from utils.concept_drift_simulation import create_shared_concepts, initialize_drift_patterns
 from threading import Thread
 import torch
 import torch.nn as nn
@@ -113,10 +115,15 @@ class FedDCA(Server):
                 self.drift_data_dir = args.cmd_args.drift_data_dir
             if hasattr(args.cmd_args, 'max_iterations'):
                 self.max_iterations = args.cmd_args.max_iterations
+        
+        # 初始化服务器端共享的概念漂移模拟
+        self.initialize_shared_concepts()
                 
         # 如果启用了概念漂移数据集，加载漂移配置
         if self.use_drift_dataset and self.drift_data_dir:
-            self.load_drift_config()        # 确保args中包含必要的聚类参数
+            self.load_drift_config()
+
+        # 确保args中包含必要的聚类参数
         if not hasattr(args, 'num_clusters'):
             args.num_clusters = 2  # 默认集群数
         if not hasattr(args, 'split_threshold'):
@@ -142,7 +149,7 @@ class FedDCA(Server):
         self.rs_test_acc = []  # 初始化测试准确率列表
         self.rs_train_loss = []  # 初始化训练损失列表
         self.rs_test_acc = []  # 初始化测试准确率列表
-        self.rs_train_loss = []  # 初始化训练损失列表
+        self.rs_train_loss = []  # 初始化训练损失列表    # 方法已移至serverdca_concepts.py模块
 
     def load_drift_config(self):
         """加载概念漂移数据集的配置信息"""
@@ -183,6 +190,7 @@ class FedDCA(Server):
                 client.use_drift_dataset = True
                 client.drift_data_dir = self.drift_data_dir
                 client.max_iterations = self.max_iterations
+                client.simulate_drift = True
             
             print(f"Loaded drift configuration: {self.num_concepts} concepts, {len(self.drift_iterations)} drift points")
             print(f"Drift will occur at iterations: {self.drift_iterations}")
@@ -260,8 +268,7 @@ class FedDCA(Server):
                 # 确保特征数据格式正确
                 if isinstance(features, torch.Tensor):
                     features = features.detach().cpu().numpy()
-                
-                # 跳过空的特征集
+                  # 跳过空的特征集
                 if features.size == 0 or features.shape[0] == 0:
                     continue
                     
@@ -539,8 +546,7 @@ class FedDCA(Server):
               # 如果可用客户端数量不足以进行所需数量的聚类，调整聚类数
             num_clusters = min(self.args.num_clusters, len(client_ids))
             if num_clusters < 2:
-                num_clusters = 1
-              # 使用层次聚类
+                num_clusters = 1              # 使用层次聚类
             try:
                 # 尝试使用预计算的距离矩阵
                 clustering = AgglomerativeClustering(
@@ -782,11 +788,20 @@ class FedDCA(Server):
 
     #     print("\nCluster Distribution:")
     #     for cluster_id, stats in cluster_stats.items():
-    #         print(f"Cluster {cluster_id}: {stats['count']} clients")
-
-    @plot_metrics()
+    #         print(f"Cluster {cluster_id}: {stats['count']} clients")    @plot_metrics()
     def train(self):
         """训练过程的主控制流"""
+        # 首先初始化共享概念，确保所有客户端都使用相同的概念集
+        if not hasattr(self, 'drift_concepts_initialized'):
+            print("\n初始化共享概念漂移配置...")
+            config = initialize_shared_concepts(self)
+            self.drift_concepts_initialized = True
+            
+            # 设置聚类数量为概念数量
+            if hasattr(config, 'num_concepts') and config['num_concepts'] > 0:
+                self.args.num_clusters = config['num_concepts']
+                print(f"将聚类数量设置为与概念数量匹配: {config['num_concepts']}")
+        
         for i in range(self.global_rounds + 1):
             s_t = time.time()
             
@@ -832,9 +847,7 @@ class FedDCA(Server):
                     # is_drift_point = False
                     # if self.use_drift_dataset and (self.current_iteration - 1) in self.drift_iterations:
                     #     is_drift_point = True
-                    #     print("\n检测到概念漂移点，强制执行重新聚类...")
-    
-                    # # 如果是漂移点或者特征更新，则执行聚类
+                    #     print("\n检测到概念漂移点，强制执行重新聚类...")                    # # 如果是漂移点或者特征更新，则执行聚类
                     # if is_drift_point or len(proxy_points) > 0:
                     #     # 执行 VWC 聚类
                     #     print("\nPerforming VWC clustering...")
@@ -919,12 +932,27 @@ class FedDCA(Server):
                 if i % self.eval_gap == 0:
                     print(f"\n-------------Round {i}-------------")
                     print("\nEvaluating models...")
-                    self.evaluate()
-
-                # 可视化聚类结果
+                    self.evaluate()                # 可视化聚类结果
                 if i % self.eval_gap == 0:
                     print("\n可视化聚类结果...")
                     self.visualize_clustering(i)
+                
+                # 如果启用了概念漂移，更新迭代并保存进度
+                if hasattr(self, 'drift_concepts_initialized') and self.drift_concepts_initialized:
+                    # 更新当前迭代
+                    if not hasattr(self, 'current_iteration'):
+                        self.current_iteration = 0
+                    else:
+                        self.current_iteration += 1
+                    
+                    # 保存概念漂移进度
+                    save_concept_progress(self, i)
+                    
+                    # 通知客户端迭代更新
+                    print(f"\n更新客户端迭代状态到 {self.current_iteration}")
+                    for client in self.selected_clients:
+                        if hasattr(client, 'current_iteration'):
+                            client.current_iteration = self.current_iteration
 
                 # 记录本轮训练时间
                 round_time = time.time() - s_t
@@ -1007,7 +1035,7 @@ class FedDCA(Server):
         
         Args:
             i: 当前轮次
-        """
+        """        
         if len(self.selected_clients) == 0 or not hasattr(self, 'clusters'):
             print("没有足够的数据进行聚类可视化")
             return

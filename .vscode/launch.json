@@ -27,7 +27,7 @@
                 "-m",
                 "cnn",
                 "-algo",
-                "FedDCA",
+                "FedIFCA",
                 "-gr",
                 "200",
                 "-lbs",
@@ -44,7 +44,7 @@
                 "20",
                 "--clustering_method",
                 "label_conditional",
-                "--use_drift_dataset"
+                // "--use_drift_dataset"
             ]
         }
     ]

@@ -42,6 +42,8 @@ from flcore.servers.serverpcl import FedPCL
 from flcore.servers.servercp import FedCP
 from flcore.servers.servergpfl import GPFL
 from flcore.servers.serverdca import FedDCA
+from flcore.servers.serverifca import FedIFCA
+from flcore.servers.serverfedccfa import FedCCFA
 
 from flcore.trainmodel.models import *
 
@@ -298,25 +300,47 @@ def run(args):
 
         elif args.algorithm == "FedPCL":
             args.model.fc = nn.Identity()
-            server = FedPCL(args, i)
-
+            server = FedPCL(args, i)        
         elif args.algorithm == "FedCP":
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
             server = FedCP(args, i)
-
+            
         elif args.algorithm == "GPFL":
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
             server = GPFL(args, i)
-
+            
         elif args.algorithm == "FedDCA":
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
             server = FedDCA(args, i)
+            
+        elif args.algorithm == "FedIFCA":
+            args.head = copy.deepcopy(args.model.fc)
+            args.model.fc = nn.Identity()
+            args.model = BaseHeadSplit(args.model, args.head)
+            server = FedIFCA(args, i)
+            
+        elif args.algorithm == "FedCCFA":
+            # 为FedCCFA设置特定参数
+            if not hasattr(args, 'clf_epochs'):
+                args.clf_epochs = 1  # 分类器训练轮数
+            if not hasattr(args, 'rep_epochs'):
+                args.rep_epochs = 1  # 表示层训练轮数
+            if not hasattr(args, 'balanced_epochs'):
+                args.balanced_epochs = 1  # 平衡训练轮数
+            if not hasattr(args, 'lambda_proto'):
+                args.lambda_proto = 0.1  # 原型损失权重
+            if not hasattr(args, 'eps'):
+                args.eps = 0.5  # DBSCAN 聚类的 eps 参数
+            if not hasattr(args, 'weights'):
+                args.weights = 'label'  # 聚合权重方式 ('uniform' 或 'label')
+                
+            server = FedCCFA(args, i)
             
         else:
             raise NotImplementedError
