@@ -27,7 +27,7 @@ def generate_cifar100(data_dir, client_count, class_count, is_niid, is_balanced,
     train_path = data_dir + "train/"
     test_path = data_dir + "test/"
 
-    if check(config_path, train_path, test_path, client_count, class_count, is_niid, is_balanced, partition_type):
+    if check(config_path, train_path, test_path, client_count, is_niid, is_balanced, partition_type):
         return
         
     # Get Cifar100 data
