@@ -542,8 +542,7 @@ class FedCCFA(Server):
 
 
     def train(self):
-        for i in range(2):
-        # for i in range(self.global_rounds + 1):
+        for i in range(self.global_rounds + 1):
             self.current_round = i
 
             s_t = time.time()
@@ -685,7 +684,7 @@ class FedCCFA(Server):
             # Evaluation
             # if i % self.eval_gap == 0:
 
-            if i % 2 == 0:
+            if i % 10 == 0:
                 print(f"\\n------------- Round {i} Evaluation -------------")
                 
 
