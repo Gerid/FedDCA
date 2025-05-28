@@ -9,6 +9,8 @@ import numpy as np
 import torchvision
 import logging
 
+import wandb # Added for Weights & Biases
+
 from flcore.servers.serveravg import FedAvg
 from flcore.servers.serverpFedMe import pFedMe
 from flcore.servers.serverperavg import PerAvg
@@ -44,6 +46,8 @@ from flcore.servers.servergpfl import GPFL
 from flcore.servers.serverdca import FedDCA
 from flcore.servers.serverifca import FedIFCA
 from flcore.servers.serverfedccfa import FedCCFA
+from flcore.servers.serverfeddrift import FedDrift
+from flcore.servers.serverflash import Flash
 
 from flcore.trainmodel.models import *
 
@@ -77,6 +81,36 @@ def run(args):
         print(f"\n============= Running time: {i}th =============")
         print("Creating server and clients ...")
         start = time.time()
+
+        # Initialize Weights & Biases if enabled
+        if args.use_wandb:
+            run_name = f"{args.wandb_run_name_prefix}_{args.algorithm}_{args.dataset}_run{i}"
+            if args.use_drift_dataset:
+                run_name += "_drift"
+            
+            wandb_config = vars(args).copy()
+            # Remove sensitive or non-serializable args if necessary
+            if 'wandb_api_key' in wandb_config:
+                del wandb_config['wandb_api_key']
+
+            try:
+                wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=run_name,
+                    config=wandb_config,
+                    reinit=True,
+                    settings=wandb.Settings(
+                        start_method="thread",
+                        anonymous="never"  # Explicitly set anonymous policy
+                    )
+                )
+                print(f"Wandb initialized for run: {run_name}")
+            except Exception as e:
+                print(f"Error initializing wandb: {e}")
+                print("Proceeding without wandb.")
+                args.use_wandb = False # Disable wandb if init fails
+
 
         # Generate args.model
         if model_str == "mlr": # convex
@@ -320,31 +354,63 @@ def run(args):
             server = FedDCA(args, i)
             
         elif args.algorithm == "FedIFCA":
-            args.head = copy.deepcopy(args.model.fc)
+            args.head = copy.deepcopy(args.model.fc)            
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
             server = FedIFCA(args, i)
-        
         elif args.algorithm == "FedCCFA":
-            # 为FedCCFA设置特定参数
-            if not hasattr(args, 'clf_epochs'):
-                args.clf_epochs = 1  # 分类器训练轮数
-            if not hasattr(args, 'rep_epochs'):
-                args.rep_epochs = 1  # 表示层训练轮数
-            if not hasattr(args, 'balanced_epochs'):
-                args.balanced_epochs = 1  # 平衡训练轮数
-            if not hasattr(args, 'lambda_proto'):
-                args.lambda_proto = 0.1  # 原型损失权重
-            if not hasattr(args, 'eps'):
-                args.eps = 0.5  # DBSCAN 聚类的 eps 参数
-            if not hasattr(args, 'weights'):
-                args.weights = 'label'  # 聚合权重方式 ('uniform' 或 'label')
-            
-            # 包装模型以支持特征提取
-            from flcore.trainmodel.feature_extractors import wrap_model_for_feature_extraction
-            args.model = wrap_model_for_feature_extraction(args.model)
-                
+            # Default FedCCFA specific parameters are now mostly set in the FedCCFA server __init__
+            # or have been set via argparse with defaults from FedCCFA.yaml.
+            # We still need to ensure the model is wrapped for feature extraction
+            # and that clf_keys are determined and set for both server and clients.
+
+            # Determine classifier keys (e.g., ['classifier.weight', 'classifier.bias'])
+            # This needs to be done AFTER the model is potentially wrapped.
+            clf_keys = list(args.model.state_dict().keys())[-2:]
+
+            if not clf_keys:
+                raise ValueError("Could not determine classifier keys for the model. Ensure model has a 'classifier' attribute.")
+
+            # Instantiate the server
             server = FedCCFA(args, i)
+            
+            # Set classifier keys in the server
+            server.set_clf_keys(clf_keys)
+
+            # Set classifier keys for each client (after clients are created by the server)
+            # The server's __init__ calls self.set_clients(), so clients are available now.
+            for client in server.clients:
+                if hasattr(client, 'set_clf_keys'):
+                    client.set_clf_keys(clf_keys)
+                else:
+                    # This is a fallback, ideally clientFedCCFA should have this method
+                    # print(f"Warning: Client {client.id} does not have set_clf_keys method. Setting clf_keys directly.")
+                    client.clf_keys = clf_keys
+            
+            print(f"FedCCFA server and clients configured with clf_keys: {clf_keys}")
+
+        elif args.algorithm == "FedDrift":
+            # 为FedDrift设置特定参数
+            if not hasattr(args, 'detection_threshold'):
+                args.detection_threshold = 0.1  # 概念漂移检测阈值
+            if not hasattr(args, 'visualize_clusters'):
+                args.visualize_clusters = True  # 是否可视化集群
+                
+            server = FedDrift(args, i)
+        elif args.algorithm == "Flash":
+            # 为Flash设置特定参数
+            if not hasattr(args, 'loss_decrement'):
+                args.loss_decrement = 0.01  # 早停损失下降阈值
+            if not hasattr(args, 'beta1'):
+                args.beta1 = 0.9  # 一阶动量系数
+            if not hasattr(args, 'beta2'):
+                args.beta2 = 0.99  # 二阶动量系数
+            if not hasattr(args, 'ftau'):
+                args.ftau = 1e-8  # 数值稳定常数
+            if not hasattr(args, 'server_learning_rate'):
+                args.server_learning_rate = 1.0  # 服务器学习率
+                
+            server = Flash(args, i)
             
         else:
             raise NotImplementedError
@@ -352,6 +418,14 @@ def run(args):
         server.train()
 
         time_list.append(time.time()-start)
+
+        if args.use_wandb:
+            try:
+                wandb.finish()
+                print(f"Wandb run {run_name} finished.")
+            except Exception as e:
+                print(f"Error finishing wandb run: {e}")
+
 
     print(f"\nAverage time cost: {round(np.average(time_list), 2)}s.")
     
@@ -382,7 +456,7 @@ if __name__ == "__main__":
                         help="Local learning rate")
     parser.add_argument('-ld', "--learning_rate_decay", type=bool, default=False)
     parser.add_argument('-ldg', "--learning_rate_decay_gamma", type=float, default=0.99)
-    parser.add_argument('-gr', "--global_rounds", type=int, default=2000)
+    parser.add_argument('-gr', "--global_rounds", type=int, default=200)
     parser.add_argument('-ls', "--local_epochs", type=int, default=1, 
                         help="Multiple update steps in one local epoch.")
     parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
@@ -481,45 +555,69 @@ if __name__ == "__main__":
                        help="聚类方法: vwc (原始变分Wasserstein聚类) 或 label_conditional (基于标签的条件Wasserstein聚类)")
     # FedCCFA
     parser.add_argument('-cle', "--clf_epochs", type=int, default=1, 
-                        help="FedCCFA分类器训练轮数")
-    parser.add_argument('-rpe', "--rep_epochs", type=int, default=1, 
-                        help="FedCCFA表示层训练轮数")
-    parser.add_argument('-be', "--balanced_epochs", type=int, default=1, 
-                        help="FedCCFA平衡训练轮数")
-    parser.add_argument('-lp', "--lambda_proto", type=float, default=0.1, 
-                        help="FedCCFA原型损失权重")
-    parser.add_argument('-eps', "--eps", type=float, default=0.5, 
-                        help="FedCCFA DBSCAN聚类的eps参数")
-    parser.add_argument('-wts', "--weights", type=str, default="label",
+                        help="FedCCFA分类器训练轮数") # YAML: 1
+    parser.add_argument('-rpe', "--rep_epochs", type=int, default=5, 
+                        help="FedCCFA表示层训练轮数") # YAML: 5
+    parser.add_argument('-be', "--balanced_epochs", type=int, default=5, 
+                        help="FedCCFA平衡训练轮数") # YAML: 5
+    parser.add_argument('-lp', "--lambda_proto", type=float, default=0.0, 
+                        help="FedCCFA原型损失权重") # YAML: 0.0
+    parser.add_argument('-eps', "--eps", type=float, default=0.1, 
+                        help="FedCCFA DBSCAN聚类的eps参数") # YAML: 0.1
+    parser.add_argument('-wts', "--weights", type=str, default="uniform",
                         choices=["uniform", "label"], 
-                        help="FedCCFA聚合权重方式 (uniform或label)")
-    parser.add_argument('-pnz', "--penalize", type=str, default="L2",
+                        help="FedCCFA聚合权重方式 (uniform或label)") # YAML: uniform
+    parser.add_argument('-balr', "--balanced_clf_lr", type=float, default=0.1,
+                        help="FedCCFA clf learning rate ") # YAML: uniform
+    parser.add_argument('-pnz', "--penalize", type=str, default="contrastive",
                         choices=["L2", "contrastive"], 
-                        help="FedCCFA原型损失类型 (L2或contrastive)")
-    parser.add_argument('-tmp', "--temperature", type=float, default=0.5,
-                        help="FedCCFA对比学习温度参数")
-    parser.add_argument('-gm', "--gamma", type=float, default=0.0,
-                        help="FedCCFA自适应原型权重参数,0表示使用固定权重")
-    parser.add_argument('-orc', "--oracle", action='store_true',
-                        help="FedCCFA使用Oracle合并策略")
-    parser.add_argument('-cp', "--clustered_protos", action='store_true',
-                        help="FedCCFA使用聚类原型")
+                        help="FedCCFA原型损失类型 (L2或contrastive)") # YAML: CL (contrastive)
+    parser.add_argument('-tmp', "--temperature", type=float, default=0.1,
+                        help="FedCCFA对比学习温度参数") # YAML: 0.1
+    parser.add_argument('-gm', "--gamma", type=float, default=20.0,
+                        help="FedCCFA自适应原型权重参数,0表示使用固定权重") # YAML: 20.0
+    parser.add_argument('-orc', "--oracle", action='store_true', default=False,
+                        help="FedCCFA使用Oracle合并策略") # YAML: false
+    parser.add_argument('-cp', "--clustered_protos", action='store_true', default=True,
+                        help="FedCCFA使用聚类原型") # YAML: true
     parser.add_argument('-ci', "--cluster_interval", type=int, default=5, 
                        help="执行聚类的轮次间隔")
-    parser.add_argument('-vc', "--visualize_clusters", type=bool, default=True,
+    parser.add_argument('-vc', "--visualize_clusters", type=bool, default=True, # This was a bool, action='store_true' is better for flags
                        help="是否可视化聚类结果")
     parser.add_argument('-vi', "--vis_interval", type=int, default=10,
                        help="聚类可视化的轮次间隔")
-    parser.add_argument('-vb', "--verbose", type=bool, default=True,
+    parser.add_argument('-vb', "--verbose", type=bool, default=True, # This was a bool, action='store_true' is better for flags
                        help="是否输出详细信息")
     # 概念漂移数据集参数
     parser.add_argument('--use_drift_dataset', action='store_true', 
                         help='使用概念漂移数据集')
+
+    parser.add_argument('--simulate_drift', action='store_true', 
+                        help='使用标准数据集，但是进行模拟漂移')
     parser.add_argument('--drift_data_dir', type=str, default='../dataset/Cifar100_clustered/', 
                         help='概念漂移数据集目录')
     parser.add_argument('--max_iterations', type=int, default=200, 
                         help='概念漂移数据集的最大迭代数')
+                        
+    # Flash算法特有参数
+    parser.add_argument('--loss_decrement', type=float, default=0.01,
+                        help='Flash早停损失下降阈值')
+    parser.add_argument('--beta1', type=float, default=0.9,
+                        help='Flash一阶动量系数')
+    parser.add_argument('--beta2', type=float, default=0.99,
+                        help='Flash二阶动量系数')
+    parser.add_argument('--ftau', type=float, default=1e-8,
+                        help='Flash数值稳定常数')
 
+    # Weights & Biases arguments
+    parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
+    parser.add_argument('--wandb_project', type=str, default="FedDCA", help='Wandb project name')
+    parser.add_argument('--wandb_entity', type=str, default="Gerid", help='Wandb entity (username or team)') # User should set this
+    parser.add_argument('--wandb_api_key', type=str, default="47b2a9d806ce037a46ec07b05d6f211af19728a3",
+                        help='Wandb API key (optional, can be set as env var)')
+    parser.add_argument('--wandb_run_name_prefix', type=str, default="exp", help='Prefix for wandb run names')
+    parser.add_argument('--save_global_model_to_wandb', action='store_true', help='Save global model to Wandb Artifacts')
+    parser.add_argument('--save_results_to_wandb', action='store_true', help='Save H5 results to Wandb Artifacts')
 
     args = parser.parse_args()
 

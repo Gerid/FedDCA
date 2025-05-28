@@ -5,6 +5,7 @@ import h5py
 import copy
 import time
 import random
+import wandb # Added wandb import
 
 from utils.data_utils import read_client_data
 from utils.dlg import DLG
@@ -95,10 +96,43 @@ class Server(object):
             self.send_slow_rate)
 
     def select_clients(self):
+        if not self.clients:
+            print("Warning: select_clients called but self.clients is empty. Returning empty list.")
+            self.current_num_join_clients = 0
+            return []
+
         if self.random_join_ratio:
-            self.current_num_join_clients = np.random.choice(range(self.num_join_clients, self.num_clients+1), 1, replace=False)[0]
+            # Determine the number of clients to select when random_join_ratio is True.
+            # It should be between self.num_join_clients and self.num_clients,
+            # but also capped by the actual number of available clients (len(self.clients)).
+
+            # Lower bound for random selection: at least self.num_join_clients (but not more than available)
+            min_selectable = min(self.num_join_clients, len(self.clients))
+            min_selectable = max(0, min_selectable) # Ensure it's not negative
+
+            # Upper bound for random selection: at most self.num_clients (but not more than available)
+            max_selectable = min(self.num_clients, len(self.clients))
+            max_selectable = max(0, max_selectable) # Ensure it's not negative
+            
+            if min_selectable > max_selectable: # Should not happen with correct logic, but as a safeguard
+                self.current_num_join_clients = max_selectable
+            elif min_selectable == max_selectable:
+                self.current_num_join_clients = min_selectable
+            else:
+                # np.random.choice takes an exclusive upper bound for range
+                self.current_num_join_clients = np.random.choice(range(min_selectable, max_selectable + 1), 1, replace=False)[0]
         else:
             self.current_num_join_clients = self.num_join_clients
+
+        # Final check: ensure current_num_join_clients is not more than available clients and not negative.
+        self.current_num_join_clients = min(self.current_num_join_clients, len(self.clients))
+        self.current_num_join_clients = max(0, self.current_num_join_clients)
+
+        if self.current_num_join_clients == 0:
+            return []
+            
+        # np.random.choice requires the first argument 'a' to be non-empty if size > 0.
+        # self.clients must be non-empty here due to the initial check and current_num_join_clients > 0.
         selected_clients = list(np.random.choice(self.clients, self.current_num_join_clients, replace=False))
 
         return selected_clients
@@ -123,7 +157,10 @@ class Server(object):
         self.uploaded_ids = []
         self.uploaded_weights = []
         self.uploaded_models = []
-        tot_samples = 0
+        tot_samples = 0 # Initialize tot_samples here
+        if not active_clients: # If no clients are active, return early
+            return
+
         for client in active_clients:
             try:
                 client_time_cost = client.train_time_cost['total_cost'] / client.train_time_cost['num_rounds'] + \
@@ -152,14 +189,31 @@ class Server(object):
         for server_param, client_param in zip(self.global_model.parameters(), client_model.parameters()):
             server_param.data += client_param.data.clone() * w
 
-
-
-    def save_global_model(self):
+    def save_global_model(self, current_round=None): # Added current_round parameter
         model_path = os.path.join("models", self.dataset)
         if not os.path.exists(model_path):
             os.makedirs(model_path)
-        model_path = os.path.join(model_path, self.algorithm + "_server" + ".pt")
-        torch.save(self.global_model, model_path)
+        model_filename = self.algorithm + "_server" + ".pt"
+        model_filepath = os.path.join(model_path, model_filename)
+        torch.save(self.global_model, model_filepath)
+
+        if self.args.save_global_model_to_wandb and wandb.run is not None and current_round is not None:
+            try:
+                model_artifact = wandb.Artifact(
+                    f'{self.args.wandb_run_name_prefix}_global_model',
+                    type='model',
+                    description=f'Global model for {self.algorithm} at round {current_round}',
+                    metadata={'dataset': self.dataset, 'algorithm': self.algorithm, 'round': current_round}
+                )
+                model_artifact.add_file(model_filepath, name=f'global_model_round_{current_round}.pt')
+                aliases = ['latest', f'round_{current_round}']
+                if current_round == self.global_rounds: # Mark as final if it's the last round
+                    aliases.append('final')
+                wandb.log_artifact(model_artifact, aliases=aliases)
+                print(f"Global model saved to wandb as artifact at round {current_round}")
+            except Exception as e:
+                print(f"Error saving model to wandb: {e}")
+
 
     def load_model(self):
         model_path = os.path.join("models", self.dataset)
@@ -179,14 +233,28 @@ class Server(object):
             os.makedirs(result_path)
 
         if (len(self.rs_test_acc)):
-            algo = algo + "_" + self.goal + "_" + str(self.times)
-            file_path = result_path + "{}.h5".format(algo)
+            algo_filename = algo + "_" + self.goal + "_" + str(self.times)
+            file_path = result_path + "{}.h5".format(algo_filename)
             print("File path: " + file_path)
 
             with h5py.File(file_path, 'w') as hf:
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
                 hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
+            
+            if self.args.use_wandb and wandb.run is not None:
+                try:
+                    results_artifact = wandb.Artifact(
+                        f'{self.args.wandb_run_name_prefix}_results',
+                        type='results',
+                        description=f'H5 results file for {self.algorithm}, run {self.times}',
+                        metadata={'dataset': self.dataset, 'algorithm': self.algorithm, 'goal': self.goal, 'times': self.times}
+                    )
+                    results_artifact.add_file(file_path, name=f'{algo_filename}.h5')
+                    wandb.log_artifact(results_artifact, aliases=[f'run_{self.times}', 'latest_results'])
+                    print(f"Results H5 file saved to wandb as artifact: {algo_filename}.h5")
+                except Exception as e:
+                    print(f"Error saving results H5 to wandb: {e}")
 
     def save_item(self, item, item_name):
         if not os.path.exists(self.save_folder_name):
@@ -230,16 +298,21 @@ class Server(object):
         return ids, num_samples, losses
 
     # evaluate selected clients
-    def evaluate(self, acc=None, loss=None):
+    def evaluate(self, acc=None, loss=None, current_round=None): # Added current_round parameter
         stats = self.test_metrics()
         stats_train = self.train_metrics()
 
-        test_acc = sum(stats[2])*1.0 / sum(stats[1])
-        test_auc = sum(stats[3])*1.0 / sum(stats[1])
-        train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1])
-        accs = [a / n for a, n in zip(stats[2], stats[1])]
-        aucs = [a / n for a, n in zip(stats[3], stats[1])]
+        test_acc = sum(stats[2])*1.0 / sum(stats[1]) if sum(stats[1]) > 0 else 0
+        test_auc = sum(stats[3])*1.0 / sum(stats[1]) if sum(stats[1]) > 0 else 0
+        train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1]) if sum(stats_train[1]) > 0 else 0
         
+        # Handle cases where stats[1] might contain zeros, leading to division by zero for individual accs/aucs
+        accs = [a / n if n > 0 else 0 for a, n in zip(stats[2], stats[1])]
+        aucs = [a / n if n > 0 else 0 for a, n in zip(stats[3], stats[1])]
+        
+        std_test_acc = np.std(accs)
+        std_test_auc = np.std(aucs)
+
         if acc == None:
             self.rs_test_acc.append(test_acc)
         else:
@@ -253,9 +326,20 @@ class Server(object):
         print("Averaged Train Loss: {:.4f}".format(train_loss))
         print("Averaged Test Accurancy: {:.4f}".format(test_acc))
         print("Averaged Test AUC: {:.4f}".format(test_auc))
-        # self.print_(test_acc, train_acc, train_loss)
-        print("Std Test Accurancy: {:.4f}".format(np.std(accs)))
-        print("Std Test AUC: {:.4f}".format(np.std(aucs)))
+        print("Std Test Accurancy: {:.4f}".format(std_test_acc))
+        print("Std Test AUC: {:.4f}".format(std_test_auc))
+
+        if self.args.use_wandb and wandb.run is not None:
+            try:
+                wandb.log({
+                    "Global Train Loss": train_loss,
+                    "Global Test Accuracy": test_acc,
+                    "Global Test AUC": test_auc,
+                    "Std Test Accuracy": std_test_acc,
+                    "Std Test AUC": std_test_auc
+                }, step=self.current_round if self.current_round is not None else None)
+            except Exception as e:
+                print(f"Error logging metrics to wandb: {e}")
 
     def print_(self, test_acc, test_auc, train_loss):
         print("Average Test Accurancy: {:.4f}".format(test_acc))

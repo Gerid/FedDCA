@@ -29,7 +29,7 @@ class FedAvg(Server):
             if i%self.eval_gap == 0:
                 print(f"\n-------------Round number: {i}-------------")
                 print("\nEvaluate global model")
-                self.evaluate()
+                self.evaluate(current_round=i) # Pass current_round
 
             for client in self.selected_clients:
                 client.current_iteration = i
@@ -59,11 +59,12 @@ class FedAvg(Server):
         print(sum(self.Budget[1:])/len(self.Budget[1:]))
 
         self.save_results()
-        self.save_global_model()
+        self.save_global_model(current_round=self.global_rounds) # Pass current_round (final round)
 
         if self.num_new_clients > 0:
             self.eval_new_clients = True
             self.set_new_clients(clientAVG)
             print(f"\n-------------Fine tuning round-------------")
             print("\nEvaluate new clients")
-            self.evaluate()
+            self.evaluate() # This evaluate call is for new clients, wandb logging might not be desired or needs specific handling.
+                           # For now, leaving as is, as it's outside the main federated rounds.

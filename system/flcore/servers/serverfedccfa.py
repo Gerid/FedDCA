@@ -4,596 +4,723 @@ import time
 import numpy as np
 import os
 from flcore.servers.serverbase import Server
-from flcore.clients.clientfedccfa import clientFedCCFA
+from flcore.clients.clientfedccfa import clientFedCCFA # Ensure this client is compatible
 from threading import Thread
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt # Not used
 from sklearn.cluster import DBSCAN
-import traceback
+# import traceback # Not used
+import wandb
 
 
 class FedCCFA(Server):
     def __init__(self, args, times):
         super().__init__(args, times)
         
-        # 设置客户端
+        # Initialize client type
         self.set_slow_clients()
-        self.set_clients(clientFedCCFA)
+        self.set_clients(clientFedCCFA) # Corrected: was set_clients(clientFedCCFA)
+        # self.set_slow_clients() # This might be handled by ServerBase or not needed if join_ratio controls participation
+
+        # Classifier layer keys - will be set after model is loaded, typically in main.py
+        self.clf_keys = [] 
         
-        # 分类器层的键
-        self.clf_keys = None
+        # Global prototypes and performance tracking (from reference)
+        self.global_protos = [None] * args.num_classes # Initialize with Nones
+        # self.prev_rep_norm = 0 # Not in reference FedCCFAServer
+        # self.prev_clf_norm = 0 # Not in reference FedCCFAServer
+        # self.rep_norm_scale = 0 # Not in reference FedCCFAServer
+        # self.clf_norm_scale = 0 # Not in reference FedCCFAServer
+        self.start_time = time.time() # Start time for the server
         
-        # 全局原型和性能追踪
-        self.global_protos = []
-        self.prev_rep_norm = 0
-        self.prev_clf_norm = 0
-        self.rep_norm_scale = 0
-        self.clf_norm_scale = 0
-        
-        # 时间和性能追踪
-        self.Budget = []
-        self.client_data_size = {}  # 记录每个客户端的数据大小
-        
-        # 参数设置
+        self.Budget = [] # Kept from original
+        self.client_data_size = {}  # For weighted aggregation
+
+        # Ensure essential args are present (defaults from reference FedCCFA.yaml if not)
         if not hasattr(args, 'eps'):
-            args.eps = 0.5  # DBSCAN 聚类的 eps 参数
-        
-        # 原型聚类设置
-        if not hasattr(args, 'clustered_protos'):
-            args.clustered_protos = False  # 是否使用聚类的原型
-        
-        # Oracle 模式设置
+            args.eps = 0.5 
+        if not hasattr(args, 'clustered_protos'): # This arg is used on client side in reference
+            args.clustered_protos = False 
         if not hasattr(args, 'oracle'):
-            args.oracle = False  # 是否使用 oracle 模式合并
-        
-        print(f"\nFedCCFA设置完成!")
-        print(f"参与率 / 总客户端数: {self.join_ratio} / {self.num_clients}")
+            args.oracle = False
+        if not hasattr(args, 'weights'): # For aggregation weighting
+            args.weights = "label" # "uniform" or "label"
+        if not hasattr(args, 'gamma'): # For client-side proto_weight calculation
+             args.gamma = 0.0 # Default to disable adaptive proto_weight if not set
+        if not hasattr(args, 'lambda_proto'): # Renamed from 'lambda' to avoid keyword clash
+             args.lambda_proto = 1.0 # Default proto loss weight if gamma is 0
+
+
+        print(f"\\nFedCCFA Server initialized.")
+        print(f"Participation ratio / total clients: {self.join_ratio} / {self.num_clients}")
+        print(f"Aggregation weights type: {self.args.weights}")
+        print(f"Oracle merging: {self.args.oracle}")
+        print(f"DBSCAN eps: {self.args.eps}")
 
     def get_client_data_size(self, clients):
-        """
-        记录每个客户端的数据大小
-        
-        Args:
-            clients: 客户端列表
-        """
+        """Records the training data size for each client."""
         for client in clients:
             self.client_data_size[client.id] = client.train_samples
 
-    def send_params(self, selected_clients):
-        """
-        向选定的客户端发送模型参数
-        
-        Args:
-            selected_clients: 选定的客户端列表
-        """
-        for client in selected_clients:
-            client.set_parameters(self.global_model)
+    # send_params is inherited from ServerBase, sends the whole model.
 
-    def send_rep_params(self, selected_clients):
-        """
-        向选定的客户端发送表示层参数
+    def send_rep_params(self, clients_to_send_to):
+        """Sends representation layer parameters to specified clients."""
+        if not self.clf_keys:
+            print("Warning: clf_keys not set in server. Cannot send rep_params.")
+            return
+
+        with torch.no_grad():
+            rep_params = [param.detach().clone() for name, param in self.global_model.named_parameters()
+                          if name not in self.clf_keys]
         
-        Args:
-            selected_clients: 选定的客户端列表
-        """
-        # 获取表示层参数
-        rep_params = [param for name, param in self.global_model.named_parameters() 
-                     if name not in self.clf_keys]
-        
-        # 向每个客户端发送
-        for client in selected_clients:
+        for client in clients_to_send_to:
             client.set_rep_params(rep_params)
 
-    def aggregate_rep(self, clients):
-        """
-        聚合所有客户端的表示层参数
-        
-        Args:
-            clients: 客户端列表
-        """
-        # 获取表示层参数
-        rep_params = [param for name, param in self.global_model.named_parameters() 
-                     if name not in self.clf_keys]
-        
-        # 初始化新参数
-        new_params = torch.zeros_like(parameters_to_vector(rep_params))
-        total_size = 0
-        
-        # 加权聚合参数
-        for client in clients:
-            client_size = self.client_data_size[client.id]
-            total_size += client_size
-            
-            # 获取客户端的表示层参数
-            client_rep_params = [param for name, param in client.model.named_parameters() 
-                                if name not in self.clf_keys]
-            client_params = parameters_to_vector(client_rep_params)
-            
-            # 加权累加
-            new_params += client_size * client_params
-        
-        # 计算加权平均
-        if total_size > 0:
-            new_params /= total_size
-        
-        # 应用到全局模型
-        vector_to_parameters(new_params, rep_params)
+    def aggregate_rep(self, selected_clients):
+        """Aggregates representation layer parameters from selected clients."""
+        if not self.clf_keys:
+            print("Warning: clf_keys not set in server. Cannot aggregate rep_params.")
+            return
 
-    def aggregate_protos(self, clients):
-        """
-        根据客户端的标签分布聚合全局原型
-        
-        Args:
-            clients: 客户端列表
-        """
-        # 检查聚合权重方式
-        if not hasattr(self.args, 'weights'):
-            self.args.weights = "label"  # 默认使用标签加权
-        
-        if self.args.weights == "uniform":
-            # 均匀权重聚合
-            aggregate_proto_dict = {}
+        total_data_size = 0
+        base_params = [param for name, param in self.global_model.named_parameters() if name not in self.clf_keys]
+        aggregated_rep_vector = torch.zeros_like(parameters_to_vector(base_params), device=self.device)
+
+        for client in selected_clients:
+            client_data_size = self.client_data_size.get(client.id, 0)
+            if client_data_size == 0:
+                print(f"Warning: Client {client.id} has 0 data size. Skipping for rep aggregation.")
+                continue
             
-            for client in clients:
-                local_protos = client.local_protos
-                for label in local_protos.keys():
-                    if label in aggregate_proto_dict:
-                        aggregate_proto_dict[label] += local_protos[label]
-                    else:
-                        aggregate_proto_dict[label] = local_protos[label].clone()
-            
-            # 计算平均值
-            for label, proto in aggregate_proto_dict.items():
-                aggregate_proto_dict[label] = proto / len(clients)
+            total_data_size += client_data_size
+            client_rep_params = [param for name, param in client.model.named_parameters() 
+                                 if name not in self.clf_keys]
+            aggregated_rep_vector += parameters_to_vector(client_rep_params).to(self.device) * client_data_size
+        
+        if total_data_size > 0:
+            aggregated_rep_vector /= total_data_size
         else:
-            # 按标签分布加权聚合
-            aggregate_proto_dict = {}
-            label_size_dict = {}
+            print("Warning: Total data size is 0. Rep aggregation resulted in zero vector.")
+            # Keep original global_model rep_params if no client contributed
+            return 
+
+        # Load aggregated vector back to global model's representation layers
+        vector_to_parameters(aggregated_rep_vector, base_params)
+
+    def aggregate_protos(self, selected_clients, current_round=None):
+        """Aggregates global prototypes based on clients' local prototypes and label distributions."""
+        # Ensure self.global_protos is initialized correctly
+        if not self.global_protos or len(self.global_protos) != self.args.num_classes:
+            # Assuming prototypes are feature vectors, get dim from a client or model
+            # This is a fallback, ideally proto dim is known.
+            # For now, let's assume client.local_protos gives correctly shaped tensors.
+            # If a client has no proto for a class, it might be an issue.
+            # The reference initializes self.global_protos = [None] * num_classes
+            # and then fills it.
+            pass # Rely on client.local_protos to provide shape.
+
+        aggregate_proto_dict = {} # Stores sum of weighted protos
+        label_total_weight = {} # Stores sum of weights for each label
+
+        for client in selected_clients:
+            if not hasattr(client, 'local_protos') or not client.local_protos:
+                # print(f"Client {client.id} has no local_protos. Skipping for proto aggregation.")
+                continue
             
-            for client in clients:
-                # 获取客户端的标签分布
-                label_distribution = client.label_distribution
-                local_protos = client.local_protos
-                
-                for label in local_protos.keys():
-                    if label in aggregate_proto_dict:
-                        aggregate_proto_dict[label] += local_protos[label] * label_distribution[label]
-                        label_size_dict[label] += label_distribution[label]
+            client_label_dist = client.label_distribution # Should be a list/tensor of counts or proportions
+
+            for label_idx, local_proto in client.local_protos.items(): # client.local_protos is a dict {label: proto_tensor}
+                if local_proto is None:
+                    continue
+
+                current_weight = 0
+                if self.args.weights == "uniform":
+                    current_weight = 1.0
+                elif self.args.weights == "label":
+                    # Ensure client_label_dist is accessible and correct
+                    if label_idx < len(client_label_dist):
+                        current_weight = client_label_dist[label_idx].item() if torch.is_tensor(client_label_dist[label_idx]) else client_label_dist[label_idx]
                     else:
-                        aggregate_proto_dict[label] = local_protos[label] * label_distribution[label]
-                        label_size_dict[label] = label_distribution[label]
-            
-            # 计算加权平均值
-            for label, proto in aggregate_proto_dict.items():
-                if label_size_dict[label] > 0:
-                    aggregate_proto_dict[label] = proto / label_size_dict[label]
+                        # print(f"Warning: Label index {label_idx} out of bounds for client {client.id} label distribution. Using 0 weight.")
+                        current_weight = 0
+                else: # Default to uniform if not specified
+                    current_weight = 1.0
+
+                if current_weight == 0: # Do not include if weight is zero
+                    continue
+
+                if label_idx not in aggregate_proto_dict:
+                    aggregate_proto_dict[label_idx] = local_proto.clone().to(self.device) * current_weight
+                    label_total_weight[label_idx] = current_weight
+                else:
+                    aggregate_proto_dict[label_idx] += local_proto.to(self.device) * current_weight
+                    label_total_weight[label_idx] += current_weight
         
-        # 更新全局原型
-        self.global_protos = [aggregate_proto_dict[label] if label in aggregate_proto_dict else None 
-                             for label in range(self.args.num_classes)]
+        # Update global prototypes
+        new_global_protos = [None] * self.args.num_classes
+        for label_idx in range(self.args.num_classes):
+            if label_idx in aggregate_proto_dict and label_total_weight[label_idx] > 0:
+                new_global_protos[label_idx] = (aggregate_proto_dict[label_idx] / label_total_weight[label_idx])
+            elif self.global_protos and self.global_protos[label_idx] is not None: # Keep old if no update
+                new_global_protos[label_idx] = self.global_protos[label_idx] 
+                # print(f"Proto for label {label_idx} kept from previous round.")
+            # else:
+                # print(f"No prototype aggregated for label {label_idx} in round {current_round}.")
+
+
+        self.global_protos = new_global_protos
+
+        # Wandb logging for prototypes
+        if self.args.use_wandb and wandb.run is not None and current_round is not None:
+            # Check if there's anything to log
+            valid_protos_to_log = [p for p in self.global_protos if p is not None]
+            if not valid_protos_to_log:
+                # print(f"No valid global prototypes to log for round {current_round}.")
+                return
+
+            try:
+                # Handle None for saving, e.g., by using a zero tensor of expected shape if possible
+                # Or, filter out None values before saving, though this changes the structure.
+                # For now, let's assume we need to know the proto dimension.
+                # If all are None, we can't infer dim.
+                proto_dim = None
+                for p in self.global_protos:
+                    if p is not None:
+                        proto_dim = p.shape[0] # Assuming 1D feature vector
+                        break
+                
+                if proto_dim is None and valid_protos_to_log: # Should not happen if valid_protos_to_log is not empty
+                     proto_dim = valid_protos_to_log[0].shape[0]
+
+
+                protos_to_save_list = []
+                for p_idx, p in enumerate(self.global_protos):
+                    if p is not None:
+                        protos_to_save_list.append(p.cpu())
+                    elif proto_dim is not None : # If we know the dim, save a placeholder
+                        # print(f"Warning: Global proto for label {p_idx} is None in round {current_round}. Saving zeros.")
+                        protos_to_save_list.append(torch.zeros(proto_dim, device='cpu'))
+                    # If proto_dim is None and p is None, we skip (should not happen if list is not empty)
+
+                if not protos_to_save_list: # If after processing, list is empty
+                    # print(f"No prototypes to save to wandb for round {current_round} after handling Nones.")
+                    return
+
+                # Save as a list of tensors or a stacked tensor if all have same shape and are not None
+                # For simplicity, saving as a list of tensors (which torch.save handles)
+                
+                protos_dir = os.path.join(self.save_folder_name, "protos")
+                if not os.path.exists(protos_dir):
+                    os.makedirs(protos_dir, exist_ok=True)
+                
+                protos_filename = f"global_protos_round_{current_round}.pt"
+                protos_filepath = os.path.join(protos_dir, protos_filename)
+                torch.save(protos_to_save_list, protos_filepath)
+
+                artifact_name = f'{self.args.wandb_run_name_prefix}_global_protos'
+                protos_artifact = wandb.Artifact(
+                    artifact_name,
+                    type='global-prototypes',
+                    description=f'Global prototypes for FedCCFA at round {current_round}',
+                    metadata={'round': current_round, 'algorithm': self.algorithm, 'num_classes': self.args.num_classes, 'num_protos_saved': len(protos_to_save_list)}
+                )
+                protos_artifact.add_file(protos_filepath, name=protos_filename)
+                wandb.log_artifact(protos_artifact, aliases=[f'protos_round_{current_round}', 'latest_protos'])
+                # print(f"Global prototypes for round {current_round} saved to wandb.")
+            except Exception as e:
+                print(f"Error saving global prototypes to wandb: {e}")
+
 
     @staticmethod
     def madd(vecs):
-        """
-        计算向量之间的余弦相似度距离
-        
-        Args:
-            vecs: 向量列表
-            
-        Returns:
-            距离矩阵
-        """
+        """Computes MADD distance matrix based on cosine similarity differences."""
         def cos_sim(a, b):
-            # 计算余弦相似度
-            return a.dot(b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+            # Add epsilon for numerical stability, as in reference client
+            return a.dot(b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8) 
         
         num = len(vecs)
+        if num <= 2: # Cannot compute MADD for less than 3 vectors as per formula (div by num-2)
+            # Return a zero matrix or handle as an edge case appropriate for the caller
+            # print("MADD calculation: Not enough vectors (<=2) to compute meaningful MADD. Returning zero matrix.")
+            return np.zeros((num, num))
+
         res = np.zeros((num, num))
-        
-        # 计算每对向量之间的距离
         for i in range(num):
             for j in range(i + 1, num):
                 dist = 0.0
                 for z in range(num):
                     if z == i or z == j:
                         continue
-                    
-                    # 计算距离差异
                     dist += np.abs(cos_sim(vecs[i], vecs[z]) - cos_sim(vecs[j], vecs[z]))
                 
-                # 对称矩阵
-                if num > 2:  # 避免除以零
-                    res[i][j] = res[j][i] = dist / (num - 2)
-        
+                # Original PFL-Non-IID code had a check `if num > 2`, which is implicitly true here
+                # due to the check at the beginning of the function.
+                res[i][j] = res[j][i] = dist / (num - 2) 
         return res
 
-    def merge_classifiers(self, clf_params_dict):
+    def merge_classifiers(self, clf_params_dict_from_clients):
         """
-        通过测量每个标签的参数距离，合并相同概念下的分类器
-        
+        Merges classifiers for each label based on parameter distance using DBSCAN.
         Args:
-            clf_params_dict: 所有客户端的分类器参数。键是客户端ID，值是参数。
-            
+            clf_params_dict_from_clients: Dict {client_id: [list of classifier layer (Param) tensors]}
         Returns:
-            每个标签合并的客户端ID。键是标签，值是客户端集群列表。
+            Dict {label_idx: [[list of client_ids in cluster1], [list of client_ids in cluster2], ...]}
         """
-        client_ids = np.array(list(clf_params_dict.keys()))
-        client_clf_params = list(clf_params_dict.values())
-        label_num = self.args.num_classes
-        
+        if not self.clf_keys:
+            print("Warning: clf_keys not set in server. Cannot merge classifiers.")
+            return {label: [] for label in range(self.args.num_classes)}
+
+        client_ids_list = list(clf_params_dict_from_clients.keys())
+        # Ensure client_clf_params are correctly extracted (vectorized per label)
+        # The input clf_params_dict_from_clients should contain the actual Parameter objects or their data.
+        # The reference FedCCFA.py calls client.get_clf_parameters() which returns a list of Parameter objects.
+
         label_merged_dict = {}
-        for label in range(label_num):
-            # 计算每个标签的距离矩阵，通过分类器的参数
-            params_list = []
-            for clf_params in client_clf_params:
-                params = [param[label].detach().cpu().numpy() for param in clf_params]
-                params_list.append(np.hstack(params))
-            params_list = np.array(params_list)
+        for label_idx in range(self.args.num_classes):
+            params_for_label_list = [] # List of numpy vectors, one per client for this label_idx
+            valid_client_indices_for_label = [] # Store original indices of clients who have params for this label
+
+            for i, client_id in enumerate(client_ids_list):
+                client_clf_layers = clf_params_dict_from_clients[client_id] # List of [weight_tensor, bias_tensor]
+                
+                # Extract parameters for the current label_idx from each layer
+                # Assumes classifier layers have output units equal to num_classes (e.g., Linear layer)
+                # Weight shape: [num_classes, feature_dim], Bias shape: [num_classes]
+                # We need the parameters corresponding to *this* specific label_idx
+                
+                per_client_label_params_parts = []
+                try:
+                    for layer_param in client_clf_layers: # e.g., layer_param is weight or bias tensor
+                        if layer_param.dim() > 1: # Typically weights
+                             # Ensure label_idx is within bounds
+                            if label_idx < layer_param.shape[0]:
+                                per_client_label_params_parts.append(layer_param[label_idx].detach().cpu().numpy().flatten())
+                            else:
+                                # This client's classifier doesn't have this label_idx (e.g. smaller output layer than num_classes)
+                                # This should ideally not happen if models are consistent.
+                                # print(f"Warning: Label index {label_idx} out of bounds for client {client_id}'s classifier layer (shape {layer_param.shape}). Skipping this layer for this client.")
+                                raise IndexError # To be caught below
+                        elif layer_param.dim() == 1: # Typically biases
+                            if label_idx < layer_param.shape[0]:
+                                per_client_label_params_parts.append(layer_param[label_idx].detach().cpu().numpy().flatten()) # flatten just in case
+                            else:
+                                # print(f"Warning: Label index {label_idx} out of bounds for client {client_id}'s classifier bias (shape {layer_param.shape}). Skipping this bias for this client.")
+                                raise IndexError # To be caught below
+                    
+                    if not per_client_label_params_parts:
+                        # print(f"Client {client_id} had no classifier parameters for label {label_idx}")
+                        continue # Skip this client for this label if no params found
+
+                    params_for_label_list.append(np.hstack(per_client_label_params_parts))
+                    valid_client_indices_for_label.append(i) # Store original index from client_ids_list
+
+                except IndexError:
+                    # print(f"Skipping client {client_id} for label {label_idx} due to parameter dimension mismatch.")
+                    continue # Skip this client for this label if params are not as expected
             
-            # 计算距离矩阵
-            dist = self.madd(params_list)
+            if len(params_for_label_list) < 2 : # Need at least 2 clients to form a cluster or compare
+                label_merged_dict[label_idx] = [] # No merges possible
+                # print(f"Label {label_idx}: Not enough clients ({len(params_for_label_list)}) with valid params to perform clustering.")
+                continue
+
+            params_matrix = np.array(params_for_label_list)
+            dist_matrix = self.madd(params_matrix)
             
-            # 使用 DBSCAN 聚类
-            clustering = DBSCAN(eps=self.args.eps, min_samples=1, metric="precomputed")
-            clustering.fit(dist)
+            # DBSCAN clustering
+            # print(f"Label {label_idx} dist matrix for DBSCAN:\n{np.round(dist_matrix, 3)}")
+            clustering = DBSCAN(eps=self.args.eps, min_samples=1, metric="precomputed") # min_samples=1 means every point can be a core point
+            try:
+                cluster_labels = clustering.fit_predict(dist_matrix)
+            except Exception as e:
+                print(f"Error during DBSCAN fitting for label {label_idx}: {e}")
+                label_merged_dict[label_idx] = []
+                continue
+
+            # print(f"Label {label_idx} DBSCAN cluster labels: {cluster_labels}")
+
+            # Process clustering results
+            merged_client_id_groups = []
+            unique_cluster_labels = set(cluster_labels)
             
-            # 处理聚类结果
-            merged_ids = []
-            for i in set(clustering.labels_):
-                indices = np.where(clustering.labels_ == i)[0]
-                if len(indices) > 1:
-                    # 至少有两个分类器被合并
-                    ids = client_ids[indices]
-                    ids = sorted(list(ids))  # 排序以便观察
-                    merged_ids.append(ids)
+            original_client_ids_array = np.array(client_ids_list)[valid_client_indices_for_label]
+
+
+            for cl_label in unique_cluster_labels:
+                if cl_label == -1: # Noise points by DBSCAN, treat as singleton clusters if min_samples > 1
+                                  # With min_samples=1, -1 should not typically occur unless eps is very small.
+                    # print(f"Label {label_idx}: Noise points found by DBSCAN. Treating as singletons.")
+                    # noise_indices = np.where(cluster_labels == -1)[0]
+                    # for idx in noise_indices:
+                    #    merged_client_id_groups.append([original_client_ids_array[idx]]) # Each noise point is its own group
+                    continue # Or ignore noise points if they shouldn't form groups
+
+                current_cluster_indices = np.where(cluster_labels == cl_label)[0]
+                
+                # Only consider actual merges (groups of size > 1)
+                # The reference FedCCFA.py (methods/FedCCFA.py, line 76) includes `if len(indices) > 1:`
+                # However, the subsequent logic iterates through these groups to aggregate.
+                # If a "group" has only one client, it means its classifier for that label is unique.
+                # The aggregation for a single-client group would just be its own parameters.
+                # Let's include all groups, even singletons, as the aggregation logic will handle it.
+                # The reference `FedCCFA.py` (line 79) `merged_identities` seems to be a list of lists of client_ids.
+                
+                # if len(current_cluster_indices) > 0: # Always true if cl_label is in unique_cluster_labels and not -1
+                ids_in_cluster = original_client_ids_array[current_cluster_indices].tolist()
+                ids_in_cluster.sort() # For consistency
+                merged_client_id_groups.append(ids_in_cluster)
             
-            label_merged_dict[label] = merged_ids
+            label_merged_dict[label_idx] = merged_client_id_groups
+            # print(f"Label {label_idx} merged groups: {merged_client_id_groups}")
         
         return label_merged_dict
 
-    def oracle_merging(self, _round, ids):
-        """
-        Oracle 模式的合并策略，用于评估最佳合并结果
-        
-        Args:
-            _round: 当前轮次
-            ids: 客户端ID列表
-            
-        Returns:
-            每个标签合并的客户端ID
-        """
-        # 这里实现一个简单的 Oracle 策略，可以根据实际场景修改
-        if _round < 100:
-            # 在轮次100之前，所有客户端合并为一个组
-            return {
-                label: [ids] for label in range(self.args.num_classes)
-            }
-        else:
-            # 在轮次100之后，根据ID尾数将客户端分为3组
-            group1 = [_id for _id in ids if _id % 10 < 3]
-            group2 = [_id for _id in ids if 3 <= _id % 10 < 6]
-            group3 = [_id for _id in ids if _id % 10 >= 6]
-            
-            # 对不同的标签应用不同的分组方式
-            return {
-                0: [ids],  # 所有客户端合并
-                1: [group1, [_id for _id in ids if _id not in group1]],  # 分两组
-                2: [group1, [_id for _id in ids if _id not in group1]],
-                3: [group2, [_id for _id in ids if _id not in group2]],
-                4: [group2, [_id for _id in ids if _id not in group2]],
-                5: [group3, [_id for _id in ids if _id not in group3]],
-                6: [group3, [_id for _id in ids if _id not in group3]],
-                7: [ids],  # 所有客户端合并
-                8: [ids],
-                9: [ids]
-            }
+    def oracle_merging(self, current_round, client_ids_this_round):
+        """Oracle merging strategy based on reference FedCCFA.py (hardcoded for 10 classes)."""
+        num_classes = self.args.num_classes
+        merged_dict = {}
 
-    def aggregate_label_params(self, label, clients):
-        """
-        聚合特定标签的参数
-        
-        Args:
-            label: 要聚合的标签
-            clients: 同一组的客户端
-            
-        Returns:
-            聚合的参数向量
-        """
-        # 获取标签对应的参数
-        label_params = [param[label] for name, param in self.global_model.named_parameters() 
-                       if name in self.clf_keys]
-        
-        # 初始化聚合参数
-        aggregated_params = torch.zeros_like(parameters_to_vector(label_params))
-        label_size = 0
-        
-        # 聚合参数
-        for client in clients:
-            client_label_params = [param[label] for name, param in client.model.named_parameters() 
-                                  if name in self.clf_keys]
-            client_params = parameters_to_vector(client_label_params)
-            
-            # 根据权重方式选择聚合方法
-            if hasattr(self.args, 'weights') and self.args.weights == "uniform":
-                aggregated_params += client_params
-            else:
-                # 使用客户端标签分布作为权重
-                client_weight = client.label_distribution[label]
-                aggregated_params += client_params * client_weight
-                label_size += client_weight
-        
-        # 计算平均值
-        if hasattr(self.args, 'weights') and self.args.weights == "uniform":
-            if clients:  # 确保不为空
-                aggregated_params /= len(clients)
-        else:
-            if label_size > 0:
-                aggregated_params /= label_size
-        
-        return aggregated_params
+        if num_classes == 10: # Specific logic from reference for num_classes=10
+            if current_round < 100:
+                for label in range(num_classes):
+                    merged_dict[label] = [client_ids_this_round] # All clients in one group for each label
+            else: # Drift scenario from reference
+                merged_dict[0] = [client_ids_this_round]
+                merged_dict[1] = [[_id for _id in client_ids_this_round if 0 <= _id % 10 < 3], [_id for _id in client_ids_this_round if _id % 10 >= 3]]
+                merged_dict[2] = [[_id for _id in client_ids_this_round if 0 <= _id % 10 < 3], [_id for _id in client_ids_this_round if _id % 10 >= 3]]
+                merged_dict[3] = [[_id for _id in client_ids_this_round if 3 <= _id % 10 < 6], [_id for _id in client_ids_this_round if not (3 <= _id % 10 < 6)]]
+                merged_dict[4] = [[_id for _id in client_ids_this_round if 3 <= _id % 10 < 6], [_id for _id in client_ids_this_round if not (3 <= _id % 10 < 6)]]
+                merged_dict[5] = [[_id for _id in client_ids_this_round if _id % 10 >= 6], [_id for _id in client_ids_this_round if _id % 10 < 6]]
+                merged_dict[6] = [[_id for _id in client_ids_this_round if _id % 10 >= 6], [_id for _id in client_ids_this_round if _id % 10 < 6]]
+                merged_dict[7] = [client_ids_this_round]
+                merged_dict[8] = [client_ids_this_round]
+                merged_dict[9] = [client_ids_this_round]
+                # Filter out empty groups that might result from client selection
+                for label in range(num_classes):
+                    merged_dict[label] = [group for group in merged_dict[label] if group]
 
-    def aggregate_label_protos(self, label, clients):
-        """
-        聚合特定标签的原型
+        else: # Generic oracle: all clients in one group if no specific logic
+            # print(f"Oracle merging: Using generic strategy (all clients in one group) for num_classes={num_classes}")
+            for label in range(num_classes):
+                merged_dict[label] = [client_ids_this_round]
         
+        return merged_dict
+
+    def aggregate_label_params(self, label_idx, clients_in_group):
+        """
+        Aggregates classifier parameters for a specific label from a group of clients.
         Args:
-            label: 要聚合的标签
-            clients: 同一组的客户端
-            
+            label_idx: The specific label index.
+            clients_in_group: List of client objects in the same cluster for this label.
         Returns:
-            聚合的原型向量
+            A 1D tensor representing the aggregated parameters for this label (e.g., concatenated weight row and bias element).
         """
-        # 初始化聚合原型
-        aggregated_proto = None
-        label_size = 0
-        
-        # 聚合原型
-        for client in clients:
-            if label in client.local_protos:
-                client_proto = client.local_protos[label]
-                
-                # 根据权重方式选择聚合方法
-                if hasattr(self.args, 'weights') and self.args.weights == "uniform":
-                    if aggregated_proto is None:
-                        aggregated_proto = client_proto.clone()
-                    else:
-                        aggregated_proto += client_proto
+        if not self.clf_keys:
+            print("Warning: clf_keys not set. Cannot aggregate label_params.")
+            return None
+        if not clients_in_group:
+            # print(f"Warning: No clients in group for label {label_idx} to aggregate params.")
+            return None
+
+        # Determine the shape of label-specific parameters from the first client
+        # This assumes all clients in the group have compatible classifier structures.
+        first_client = clients_in_group[0]
+        param_template_parts = []
+        try:
+            for name, param_layer in first_client.model.named_parameters():
+                if name in self.clf_keys:
+                    if param_layer.dim() > 1 and label_idx < param_layer.shape[0]: # Weights
+                        param_template_parts.append(param_layer[label_idx].detach().clone())
+                    elif param_layer.dim() == 1 and label_idx < param_layer.shape[0]: # Biases
+                        param_template_parts.append(param_layer[label_idx].detach().clone())
+                    # else: param doesn't have this label_idx, skip (should be consistent across group)
+            
+            if not param_template_parts:
+                # print(f"Could not determine parameter template for label {label_idx} from client {first_client.id}")
+                return None
+            aggregated_params_vector = torch.zeros_like(parameters_to_vector(param_template_parts), device=self.device)
+        except IndexError:
+            # print(f"Error: Client {first_client.id} classifier params incompatible with label {label_idx}")
+            return None
+
+
+        total_weight_for_label = 0
+
+        for client in clients_in_group:
+            current_client_label_params_parts = []
+            valid_client_for_label = True
+            for name, param_layer in client.model.named_parameters():
+                if name in self.clf_keys:
+                    try:
+                        if param_layer.dim() > 1: # Weights
+                            current_client_label_params_parts.append(param_layer[label_idx].detach().clone())
+                        elif param_layer.dim() == 1: # Biases
+                            current_client_label_params_parts.append(param_layer[label_idx].detach().clone())
+                    except IndexError:
+                        # print(f"Warning: Client {client.id} params incompatible for label {label_idx}. Skipping this client for this label param aggregation.")
+                        valid_client_for_label = False
+                        break 
+            
+            if not valid_client_for_label or not current_client_label_params_parts:
+                continue # Skip this client if params are missing or incompatible
+
+            client_params_vector = parameters_to_vector(current_client_label_params_parts).to(self.device)
+            
+            current_weight = 0
+            if self.args.weights == "uniform":
+                current_weight = 1.0
+            elif self.args.weights == "label":
+                if hasattr(client, 'label_distribution') and label_idx < len(client.label_distribution):
+                    current_weight = client.label_distribution[label_idx].item() if torch.is_tensor(client.label_distribution[label_idx]) else client.label_distribution[label_idx]
                 else:
-                    # 使用客户端标签分布作为权重
-                    client_weight = client.label_distribution[label]
-                    if client_weight > 0:
-                        if aggregated_proto is None:
-                            aggregated_proto = client_proto.clone() * client_weight
-                        else:
-                            aggregated_proto += client_proto * client_weight
-                        label_size += client_weight
-        
-        # 计算平均值
-        if aggregated_proto is not None:
-            if hasattr(self.args, 'weights') and self.args.weights == "uniform":
-                valid_clients = sum(1 for client in clients if label in client.local_protos)
-                if valid_clients > 0:
-                    aggregated_proto /= valid_clients
-            else:
-                if label_size > 0:
-                    aggregated_proto /= label_size
-        
-        return aggregated_proto if aggregated_proto is not None else torch.zeros(1)
-
-    def local_evaluate(self, selected_clients, _round):
-        """
-        评估选定客户端在本地数据上的性能
-        
-        Args:
-            selected_clients: 选定的客户端
-            _round: 当前轮次
+                    # print(f"Warning: Client {client.id} missing label_distribution for label {label_idx}. Using 0 weight for param agg.")
+                    current_weight = 0
+            else: # Default to uniform
+                current_weight = 1.0
             
+            if current_weight > 0:
+                aggregated_params_vector += client_params_vector * current_weight
+                total_weight_for_label += current_weight
+        
+        if total_weight_for_label > 0:
+            aggregated_params_vector /= total_weight_for_label
+            return aggregated_params_vector
+        else:
+            # print(f"Warning: Total weight for label {label_idx} is 0. Returning None for aggregated_params_vector.")
+            # Fallback: could return the average of the first client's params or zeros of correct shape if template is known
+            return None # Or torch.zeros_like(parameters_to_vector(param_template_parts))
+
+    def aggregate_label_protos(self, label_idx, clients_in_group):
+        """
+        Aggregates prototypes for a specific label from a group of clients.
+        Args:
+            label_idx: The specific label index.
+            clients_in_group: List of client objects in the same cluster for this label.
         Returns:
-            平均本地准确率
+            A tensor for the aggregated prototype for this label, or None.
         """
-        local_accuracies = []
-        
-        for client in selected_clients:
-            # 测试本地模型在本地数据上的性能
-            test_acc, test_num = client.test_metrics()
-            if test_num > 0:
-                local_accuracies.append(test_acc / test_num)
-        
-        # 计算平均准确率
-        if local_accuracies:
-            avg_accuracy = sum(local_accuracies) / len(local_accuracies)
-            
-            # 记录性能
-            if _round % 20 == 0:
-                self.rs_test_acc.append(avg_accuracy)
-            
-            return avg_accuracy
-        else:
-            return 0.0
+        if not clients_in_group:
+            # print(f"Warning: No clients in group for label {label_idx} to aggregate protos.")
+            return None
 
-    def global_evaluate(self, selected_clients, global_test_sets, _round):
-        """
-        评估选定客户端在全局测试集上的性能
-        
-        Args:
-            selected_clients: 选定的客户端
-            global_test_sets: 全局测试集
-            _round: 当前轮次
-            
-        Returns:
-            平均全局准确率
-        """
-        # 如果有特殊的全局测试集，则使用它进行评估
-        # 对于标准 PFL-Non-IID 项目，我们使用客户端的测试数据
-        global_accuracies = []
-        
-        for client in selected_clients:
-            # 测试本地模型在测试集上的性能
-            test_acc, test_num = client.test_metrics()
-            if test_num > 0:
-                global_accuracies.append(test_acc / test_num)
-        
-        # 计算平均准确率
-        if global_accuracies:
-            avg_accuracy = sum(global_accuracies) / len(global_accuracies)
-            return avg_accuracy
-        else:
-            return 0.0
+        aggregated_proto = None
+        total_weight_for_label = 0
+        proto_initialized = False
 
-    def last_round_evaluate(self, clients, global_test_sets):
-        """
-        在最后一轮评估所有客户端
+        for client in clients_in_group:
+            if hasattr(client, 'local_protos') and label_idx in client.local_protos and client.local_protos[label_idx] is not None:
+                client_proto = client.local_protos[label_idx].to(self.device)
+                
+                current_weight = 0
+                if self.args.weights == "uniform":
+                    current_weight = 1.0
+                elif self.args.weights == "label":
+                    if hasattr(client, 'label_distribution') and label_idx < len(client.label_distribution):
+                         current_weight = client.label_distribution[label_idx].item() if torch.is_tensor(client.label_distribution[label_idx]) else client.label_distribution[label_idx]
+                    else:
+                        # print(f"Warning: Client {client.id} missing label_distribution for label {label_idx}. Using 0 weight for proto agg.")
+                        current_weight = 0
+                else: # Default to uniform
+                    current_weight = 1.0
+
+                if current_weight > 0:
+                    if not proto_initialized:
+                        aggregated_proto = torch.zeros_like(client_proto, device=self.device)
+                        proto_initialized = True
+                    
+                    aggregated_proto += client_proto * current_weight
+                    total_weight_for_label += current_weight
+            # else:
+                # print(f"Client {client.id} does not have a local prototype for label {label_idx}. Skipping for proto aggregation.")
         
-        Args:
-            clients: 所有客户端
-            global_test_sets: 全局测试集
-        """
-        # 本地评估
-        local_accuracies = []
-        for client in clients:
-            test_acc, test_num = client.test_metrics()
-            if test_num > 0:
-                local_accuracies.append(test_acc / test_num)
-        
-        # 计算平均本地准确率
-        if local_accuracies:
-            avg_local_accuracy = sum(local_accuracies) / len(local_accuracies)
-            print(f"Final average local accuracy: {avg_local_accuracy:.4f}")
+        if proto_initialized and total_weight_for_label > 0:
+            aggregated_proto /= total_weight_for_label
+            return aggregated_proto
         else:
-            print("No valid local accuracy results.")
+            # print(f"Warning: Could not aggregate proto for label {label_idx}. Total weight {total_weight_for_label}, Initialized: {proto_initialized}")
+            return None
+
 
     def train(self):
-        """训练过程的主控制流"""
-        # 获取所有客户端的数据大小信息
-        self.get_client_data_size(self.clients)
-        
-        # 设置分类器层的键
-        # 确定分类器层的键，通常是最后几层
-        # 这里假设最后两层是分类器层
-        if self.clf_keys is None:
-            self.clf_keys = list(self.global_model.state_dict().keys())[-2:]
-            print(f"设置分类器层键为：{self.clf_keys}")
-        
-        # 将分类器层键分配给所有客户端
-        for client in self.clients:
-            client.clf_keys = self.clf_keys
-        
-        # 训练循环
-        for i in range(self.global_rounds + 1):
-            s_t = time.time()
-            
-            # 处理数据漂移（如果有配置）
-            if hasattr(self.args, 'drift_pattern'):
-                if self.args.drift_pattern == "sudden" and i == 100:
-                    print("模拟突然漂移在轮次 100")
-                    # 在真实系统中需要实现 sudden_drift 函数
-                elif self.args.drift_pattern == "recurrent" and i in [100, 150]:
-                    print(f"模拟重复漂移在轮次 {i}")
-                    # 在真实系统中需要实现 sudden_drift 函数
-                elif self.args.drift_pattern == "incremental" and i in [100, 110, 120]:
-                    print(f"模拟渐进漂移在轮次 {i}")
-                    # 在真实系统中需要实现 incremental_drift 函数
-            
-            # 每轮选择客户端
-            self.selected_clients = self.select_clients()
-            
-            # 向选定的客户端发送参数
-            self.send_params(self.selected_clients)
-            
-            # 用于存储平衡训练后的分类器参数
-            balanced_clf_params_dict = {}
-            
-            # 每个客户端进行训练
-            for client in self.selected_clients:
-                # 更新客户端的标签分布
-                client.update_label_distribution()
-                
-                # 如果配置了平衡训练，执行平衡训练
-                if hasattr(self.args, 'balanced_epochs') and self.args.balanced_epochs > 0:
-                    client.balance_train()
-                    balanced_clf_params_dict[client.id] = copy.deepcopy(client.get_clf_parameters())
-                
-                # 如果没有使用聚类的原型，共享全局原型
-                if not hasattr(self.args, 'clustered_protos') or not self.args.clustered_protos:
-                    client.global_protos = copy.deepcopy(self.global_protos)
-                
-                # 使用原型进行训练
-                client.train_with_protos(i)
-                
-                # 如果没有平衡训练，使用当前分类器参数
-                if not hasattr(self.args, 'balanced_epochs') or self.args.balanced_epochs == 0:
-                    balanced_clf_params_dict[client.id] = copy.deepcopy(client.get_clf_parameters())
-            
-            # 聚合表示层参数
-            self.aggregate_rep(self.selected_clients)
-            
-            # 聚合原型
-            self.aggregate_protos(self.selected_clients)
-            
-            # 向客户端发送聚合后的表示层参数
-            self.send_rep_params(self.selected_clients)
-            
-            # 基于分类器参数进行标签级别的合并
-            if hasattr(self.args, 'oracle') and self.args.oracle:
-                # 使用 Oracle 策略合并
-                label_merged_dict = self.oracle_merging(i, [c.id for c in self.selected_clients])
-            else:
-                # 使用基于参数相似性的合并
-                label_merged_dict = self.merge_classifiers(balanced_clf_params_dict)
-            
-            # 打印合并结果
-            for label, merged_identities in label_merged_dict.items():
-                if merged_identities:  # 如果有合并的客户端
-                    print(f"标签 {label} 合并：{merged_identities}")
-                    
-                    for indices in merged_identities:
-                        # 聚合个性化分类器参数和原型
-                        clients_group = [client for client in self.selected_clients if client.id in indices]
-                        if clients_group:
-                            # 聚合标签级别的参数
-                            aggregated_label_params = self.aggregate_label_params(label, clients_group)
-                            aggregated_label_proto = self.aggregate_label_protos(label, clients_group)
-                            
-                            # 更新每个客户端的参数
-                            for client in clients_group:
-                                client_label_params = [param[label] for name, param in client.model.named_parameters()
-                                                     if name in self.clf_keys]
-                                vector_to_parameters(aggregated_label_params, client_label_params)
-                                client.set_label_params(label, client_label_params)
-                                
-                                # 更新原型
-                                if len(aggregated_label_proto) > 1:  # 确保有效的原型
-                                    client.global_protos[label] = aggregated_label_proto.clone()
-            
-            # 保存客户端的分类器参数
-            for client in self.selected_clients:
-                client.p_clf_params = copy.deepcopy(client.get_clf_parameters())
-            
-            # 计算此轮的训练时间
-            e_t = time.time()
-            self.Budget.append(e_t - s_t)
-            
-            # 定期评估
-            if i % 20 == 0:
-                local_accuracy = self.local_evaluate(self.selected_clients, i)
-                global_accuracy = self.global_evaluate(self.selected_clients, None, i)
-                print(f"轮次 {i} | 本地准确率: {local_accuracy:.4f} | 全局准确率: {global_accuracy:.4f}")
-            
-            # 是否达到预设的准确率要求提前结束
-            if self.auto_break and len(self.rs_test_acc) > 0 and self.rs_test_acc[-1] > 0.99:
-                break
-        
-        # 最终评估
-        print("\n训练完成!")
-        self.last_round_evaluate(self.clients, None)
-        
-        # 输出耗时统计
-        if len(self.Budget) > 0:
-            avg_time = sum(self.Budget) / len(self.Budget)
-            print(f"平均每轮耗时: {avg_time:.2f}秒")
-        
-        # 保存结果
-        self.save_results()
+        for i in range(2):
+        # for i in range(self.global_rounds + 1):
+            self.current_round = i
 
-    
-   
+            s_t = time.time()
+
+            # Potentially apply concept drift (logic from reference FedCCFA.py main script)
+            # This would require access to the full client list and global_test_sets,
+            # and drift functions like sudden_drift, incremental_drift.
+            # For now, this is omitted from server.train() but could be added if drift simulation is needed here.
+
+            selected_clients = self.select_clients() # From ServerBase
+            self.get_client_data_size(selected_clients) # Update data sizes for selected clients
+
+            # Initial send of full model (includes rep and classifier)
+            # Clients will use this to initialize or reset their models.
+            # The reference FedCCFA.py sends full params, then clients might get p_clf_params.
+            # Let's send full model, then rep_params after first rep aggregation.
+            if i == 0: # Initial round, send full model
+                 self.send_models() # beta=1 for full model
+                 # Initialize client's p_clf_params with the current global classifier
+                 for client in selected_clients:
+                    client.p_clf_params = [p.detach().clone() for name, p in self.global_model.named_parameters() if name in self.clf_keys]
+
+            # Client-side operations
+            client_timings = []
+            balanced_clf_params_from_clients = {} # To store clf params after balanced_train or train_with_protos
+
+            for client in selected_clients:
+                client_start_time = time.time()
+
+                # 1. Client updates its label distribution
+                client.update_label_distribution()
+
+                # 2. Client performs balanced training (updates its classifier)
+                if self.args.balanced_epochs > 0:
+                    client.balance_train() 
+                    # Store classifier params after balanced training
+                    balanced_clf_params_from_clients[client.id] = [p.detach().clone() for p in client.get_clf_parameters()]
+                
+                # 3. Client receives global prototypes (if not clustered_protos on client)
+                # The client FedCCFA's train_with_protos uses self.global_protos.
+                # This needs to be set on the client.
+                if not self.args.clustered_protos: # clustered_protos is an arg for client behavior
+                    # Send current server's global_protos to client
+                    # Client's train_with_protos will use its self.global_protos
+                    client.global_protos = [p.clone().to(client.device) if p is not None else None for p in self.global_protos]
+
+                # 4. Client trains representation and classifier with prototypes
+                # This updates client.model (rep and clf) and client.local_protos
+                client.train_with_protos(current_round=i) 
+
+                # 5. Store classifier params (if not already stored after balanced_train)
+                if self.args.balanced_epochs == 0:
+                    balanced_clf_params_from_clients[client.id] = [p.detach().clone() for p in client.get_clf_parameters()]
+                
+                client_timings.append(time.time() - client_start_time)
+
+            if self.args.use_wandb:
+                wandb.log({"Client Training Time (avg)": np.mean(client_timings) if client_timings else 0}, step=i)
+
+            # Server-side aggregations and updates
+            server_aggregation_start_time = time.time()
+
+            # 6. Aggregate representation layers from clients
+            self.aggregate_rep(selected_clients)
+
+            # 7. Aggregate global prototypes from clients' local_protos
+            self.aggregate_protos(selected_clients, current_round=i)
+            
+            # 8. Send updated representation parameters to clients
+            self.send_rep_params(selected_clients) # Clients now have G_rep, G_protos
+
+            # 9. Merge classifiers
+            if self.args.oracle:
+                # print(f"Round {i}: Using Oracle Merging.")
+                client_ids_this_round = [c.id for c in selected_clients]
+                label_merged_client_groups = self.oracle_merging(i, client_ids_this_round)
+            else:
+                # print(f"Round {i}: Using DBSCAN Classifier Merging.")
+                # Ensure balanced_clf_params_from_clients is populated correctly
+                if not balanced_clf_params_from_clients:
+                    print(f"Warning Round {i}: balanced_clf_params_from_clients is empty. Skipping classifier merging.")
+                    # Create empty groups so loop below doesn't fail
+                    label_merged_client_groups = {label_idx: [] for label_idx in range(self.args.num_classes)}
+                else:
+                    label_merged_client_groups = self.merge_classifiers(balanced_clf_params_from_clients)
+            
+            if self.args.use_wandb:
+                # Log number of groups per label, or average number of groups
+                num_groups_per_label = [len(groups) for groups in label_merged_client_groups.values()]
+                wandb.log({
+                    "Avg Groups per Label": np.mean(num_groups_per_label) if num_groups_per_label else 0,
+                    "Total Groups": np.sum(num_groups_per_label)
+                }, step=i)
+
+
+            # 10. Aggregate label-specific parameters and prototypes for each group and send to clients
+            for label_idx, client_id_groups_for_label in label_merged_client_groups.items():
+                if not client_id_groups_for_label: # No groups for this label
+                    # print(f"Round {i}, Label {label_idx}: No client groups from merging. Skipping label param/proto aggregation.")
+                    continue
+
+                for group_of_client_ids in client_id_groups_for_label:
+                    if not group_of_client_ids: # Empty group
+                        continue
+                    
+                    # Map client IDs to client objects
+                    clients_in_current_group = [client for client in selected_clients if client.id in group_of_client_ids]
+                    if not clients_in_current_group:
+                        # print(f"Round {i}, Label {label_idx}: Client ID group {group_of_client_ids} resulted in no client objects. Skipping.")
+                        continue
+
+                    # Aggregate label-specific classifier parameters for this group
+                    aggregated_label_specific_params_vector = self.aggregate_label_params(label_idx, clients_in_current_group)
+                    
+                    # Aggregate label-specific prototypes for this group
+                    aggregated_label_specific_proto = self.aggregate_label_protos(label_idx, clients_in_current_group)
+
+                    # Send to clients in this group
+                    for client in clients_in_current_group:
+                        # Client needs to set these aggregated label-specific params into its classifier
+                        if aggregated_label_specific_params_vector is not None:
+                            # Client needs a method like set_label_specific_parameters(label_idx, params_vector)
+                            # This method would convert vector to param list and update model[clf_keys][label_idx]
+                            client.set_label_parameters(label_idx, aggregated_label_specific_params_vector) # Assumes client method takes vector
+
+                        # Client updates its global_protos[label_idx] with this group's aggregated proto
+                        if aggregated_label_specific_proto is not None:
+                            if not client.global_protos or len(client.global_protos) != self.args.num_classes:
+                                client.global_protos = [None] * self.args.num_classes # Initialize if needed
+                            client.global_protos[label_idx] = aggregated_label_specific_proto.clone().to(client.device)
+            
+            # 11. Clients store their final personalized classifier parameters for the next round's initialization
+            for client in selected_clients:
+                client.p_clf_params = [p.detach().clone() for p in client.get_clf_parameters()]
+
+            if self.args.use_wandb:
+                wandb.log({"Server Aggregation Time": time.time() - server_aggregation_start_time}, step=i)
+
+            # Evaluation
+            # if i % self.eval_gap == 0:
+
+            if i % 2 == 0:
+                print(f"\\n------------- Round {i} Evaluation -------------")
+                
+
+                # Test on clients using their updated local models
+                self.evaluate(current_round=self.current_round)# Uses client.test_metrics()
+
+                # Optionally, test global model on a global test set if available
+            
+
+        print("\\nFedCCFA Training finished.")
+
+        self.save_results()
+        self.save_global_model(self.current_round)
+
+    def evaluate_global_model(self, current_round, final_eval=False):
+        if self.global_test_set is None:
+            return
+
+        stats = self.test_metrics(self.global_model, self.global_test_set, self.device)
+        
+        if self.args.use_wandb:
+            log_data = {
+                f"Global Model/Average Accuracy": stats['accuracy'],
+                f"Global Model/Average Loss": stats['loss']
+            }
+            if final_eval:
+                 wandb.summary[f"Final Global Model Accuracy"] = stats['accuracy']
+                 wandb.summary[f"Final Global Model Loss"] = stats['loss']
+
+            wandb.log(log_data, step=current_round)
+        print(f"Global Model --- Round {current_round} --- Acc: {stats['accuracy']:.4f}, Loss: {stats['loss']:.4f}")
+
+
+
+    def set_clf_keys(self, clf_keys):
+        """Sets the classifier keys for the server."""
+        self.clf_keys = clf_keys
+        print(f"Server clf_keys set to: {self.clf_keys}")

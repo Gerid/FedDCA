@@ -173,13 +173,17 @@ class FedAvgCNN(nn.Module):
         )
         self.fc = nn.Linear(512, num_classes)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         out = self.conv1(x)
         out = self.conv2(out)
         out = torch.flatten(out, 1)
-        out = self.fc1(out)
-        out = self.fc(out)
-        return out
+        feature = self.fc1(out)
+        out = self.fc(feature)
+
+        if return_features:
+            return out, feature
+        else:
+            return out
 
 # ====================================================================================================================
 

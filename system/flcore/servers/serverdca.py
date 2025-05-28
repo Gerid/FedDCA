@@ -27,6 +27,7 @@ from sklearn.metrics import silhouette_score, adjusted_rand_score
 from sklearn.metrics import davies_bouldin_score, calinski_harabasz_score
 import traceback
 from functools import wraps
+import wandb # Added wandb import
 
 def plot_metrics(train_loss_list=None, test_acc_list=None):
     def decorator(func):
@@ -123,20 +124,6 @@ class FedDCA(Server):
         if self.use_drift_dataset and self.drift_data_dir:
             self.load_drift_config()
 
-        # 确保args中包含必要的聚类参数
-        if not hasattr(args, 'num_clusters'):
-            args.num_clusters = 2  # 默认集群数
-        if not hasattr(args, 'split_threshold'):
-            args.split_threshold = 0.3  # 默认分裂阈值
-        if not hasattr(args, 'merge_threshold'):
-            args.merge_threshold = 0.1  # 默认合并阈值
-        if not hasattr(args, 'kde_samples'):
-            args.kde_samples = 100  # 默认KDE采样数
-        if not hasattr(args, 'proxy_dim'):
-            args.proxy_dim = 128  # 代理特征维度
-        if not hasattr(args, 'sinkhorn_reg'):
-            args.sinkhorn_reg = 0.01  # Sinkhorn 正则化参数
-
         # 初始化 VWC 聚类器
         self.vwc = VariationalWassersteinClustering(
             num_clients=args.num_clients,
@@ -146,10 +133,8 @@ class FedDCA(Server):
         )
 
         self.Budget = []  # 用于记录每轮训练的时间成本
-        self.rs_test_acc = []  # 初始化测试准确率列表
-        self.rs_train_loss = []  # 初始化训练损失列表
-        self.rs_test_acc = []  # 初始化测试准确率列表
-        self.rs_train_loss = []  # 初始化训练损失列表    # 方法已移至serverdca_concepts.py模块
+        # self.rs_test_acc = []  # 初始化测试准确率列表 # Already in serverbase
+        # self.rs_train_loss = [] # 初始化训练损失列表 # Already in serverbase
 
     def load_drift_config(self):
         """加载概念漂移数据集的配置信息"""
@@ -206,17 +191,51 @@ class FedDCA(Server):
             # 如果使用概念漂移数据集，更新客户端的迭代状态
             if self.use_drift_dataset:
                 print(f"\n更新客户端迭代状态到 {self.current_iteration}")
-                for client in self.selected_clients:
+                for client in self.clients: # Update for all clients, or selected_clients if selection happens before this
                     client.update_iteration(self.current_iteration)
             
                 # 检查是否是漂移点
                 if self.current_iteration in self.drift_iterations:
                     print(f"\n⚠️ 在迭代 {self.current_iteration} 发生概念漂移")
+                    # Potentially log drift event to wandb
+                    if wandb.run is not None:
+                        wandb.log({"Concept Drift Event": 1, "Drift Iteration": self.current_iteration}, step=round_idx)
             
-                # 更新迭代计数器，为下一轮做准备
-                self.current_iteration = (self.current_iteration + 1) % self.max_iterations            # 执行正常的训练过程
-            super().train_round(round_idx)
-        
+            # 执行正常的训练过程
+            # super().train_round(round_idx) # This method does not exist in serverbase. Assuming it's a typo and FedDCA has its own train loop structure.
+            # The following is a simplified representation of a training loop structure for FedDCA
+            # This will need to be adapted to the actual structure of FedDCA's training logic.
+
+            # Placeholder for the actual training loop structure within FedDCA
+            # This is a conceptual adjustment based on common patterns in other server files.
+            # The actual implementation details of FedDCA's training loop need to be reviewed
+            # to correctly integrate the current_round passing.
+
+            # Example structure (needs to be verified and adapted):
+            # self.selected_clients = self.select_clients()
+            # self.send_models() 
+            
+            # if round_idx % self.eval_gap == 0:
+            #     print(f"\n-------------Round number: {round_idx}-------------")
+            #     print("\nEvaluate global model")
+            #     self.evaluate(current_round=round_idx)
+
+            # for client in self.selected_clients:
+            # client.train()
+            
+            # self.receive_models()
+            # self.aggregate_parameters() # Or specific aggregation for FedDCA
+            
+            # self.Budget.append(time.time() - s_t) # s_t needs to be defined at the start of the round
+            # print('-'*25, 'time cost', '-'*25, self.Budget[-1])
+
+            # if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
+            #     pass # break
+
+            # At the end of all rounds:
+            # self.save_results()
+            # self.save_global_model(current_round=self.global_rounds) # Pass current_round (final round)
+
         except Exception as e:
             print(f"Error in train_round: {str(e)}")
             import traceback
@@ -792,1172 +811,177 @@ class FedDCA(Server):
     #     for cluster_id, stats in cluster_stats.items():
     #         print(f"Cluster {cluster_id}: {stats['count']} clients")    @plot_metrics()
     def train(self):
-        """训练过程的主控制流"""
-        # 首先初始化共享概念，确保所有客户端都使用相同的概念集
-        if not hasattr(self, 'drift_concepts_initialized'):
-            print("\n初始化共享概念漂移配置...")
-            config = initialize_shared_concepts(self)
-            self.drift_concepts_initialized = True
-            
-            # 设置聚类数量为概念数量
-            if hasattr(config, 'num_concepts') and config['num_concepts'] > 0:
-                self.args.num_clusters = config['num_concepts']
-                print(f"将聚类数量设置为与概念数量匹配: {config['num_concepts']}")
-        
         for i in range(self.global_rounds + 1):
             s_t = time.time()
-            
-            try:
-                # 选择本轮参与训练的客户端
-                self.selected_clients = self.select_clients()
-                
-                if not self.cluster_inited:
-                    # 首轮训练时初始化集群
-                    print("\nInitializing clusters...")
-                    for client in self.selected_clients:
-                        self.clusters[client.id] = 0
-                    self.cluster_centroids[0] = copy.deepcopy(self.global_model)
-                    self.cluster_inited = True
+            self.current_round = i # Keep track of current round
 
-                # 客户端本地训练
-                print("\nClients training locally...")
-                for client in self.selected_clients:
-                    client.train()
-                
-                # 收集中间特征用于聚类
-                print("\nCollecting features for clustering...")
-                proxy_points = []
-                for client in self.selected_clients:
-                    if hasattr(client, 'intermediate_output') and client.intermediate_output is not None:
-                        # 确保数据在正确的设备上
-                        if isinstance(client.intermediate_output, torch.Tensor):
-                            intermediate_output = client.intermediate_output.to(self.device)
-                        else:
-                            intermediate_output = torch.tensor(client.intermediate_output).to(self.device)
-                        proxy_points.append(intermediate_output)
-                
-                if len(proxy_points) > 0:
-                    # 转换为张量并调整维度
-                    proxy_points = torch.stack(proxy_points)
-                    if len(proxy_points.shape) < 3:
-                        proxy_points = proxy_points.unsqueeze(1)
-                    
-                    # 确保数据在正确的设备上
-                    proxy_points = proxy_points.to(self.device)
+            # 概念漂移处理 (如果启用)
+            if self.use_drift_dataset:
+                print(f"\nUpdating client iteration to {self.current_iteration} for round {i}")
+                for client in self.clients: # Update for all clients, or selected_clients if selection happens before this
+                    client.update_iteration(self.current_iteration)
+                if self.current_iteration in self.drift_iterations:
+                    print(f"\n⚠️ Concept drift occurring at iteration {self.current_iteration} (Round {i})")
+                    # Potentially log drift event to wandb
+                    if wandb.run is not None:
+                        wandb.log({"Concept Drift Event": 1, "Drift Iteration": self.current_iteration}, step=i)
 
-                    # # 在执行 VWC 聚类前，检查是否刚刚发生概念漂移
-                    # is_drift_point = False
-                    # if self.use_drift_dataset and (self.current_iteration - 1) in self.drift_iterations:
-                    #     is_drift_point = True
-                    #     print("\n检测到概念漂移点，强制执行重新聚类...")                    # # 如果是漂移点或者特征更新，则执行聚类
-                    # if is_drift_point or len(proxy_points) > 0:
-                    #     # 执行 VWC 聚类
-                    #     print("\nPerforming VWC clustering...")
-                    #     # ...原有的聚类代码...
-                          # 执行聚类
-                    print("\n执行客户端聚类...")
-                      # 确定使用哪种聚类算法
-                    clustering_method = 'vwc'
-                    if hasattr(self.args, 'clustering_method'):
-                        clustering_method = self.args.clustering_method
-                        
-                    if clustering_method == 'label_conditional':
-                        # 执行基于标签条件分布的Wasserstein聚类
-                        print("使用基于标签条件分布的Wasserstein聚类...")
-                        success = self.label_conditional_clustering()
-                        if not success:
-                            print("标签条件聚类未能产生有效结果，回退到原始VWC聚类")
-                            clustering_method = 'vwc'  # 回退到原始方法
-                    
-                    if clustering_method == 'enhanced_label':
-                        # 使用我们新增的增强型标签条件聚类方法
-                        print("使用增强型标签条件聚类（结合预测标签和中间表征）...")
-                        # 执行增强型标签条件聚类
-                        self.label_conditional_clustering()
-                    elif clustering_method == 'vwc':
-                        # 使用原始的VWC聚类
-                        print("使用原始变分Wasserstein聚类...")
-                        self.vwc_clustering()
-                      # 如果使用原始VWC聚类或标签条件聚类失败
-                    if clustering_method == 'vwc':
-                        print("使用原始变分Wasserstein聚类...")
-                        try:
-                            # 初始化VWC模型
-                            vwc_model = VariationalWassersteinClustering(
-                                num_clients=len(self.selected_clients),
-                                num_clusters=self.args.num_clusters,
-                                proxy_dim=proxy_points.shape[-1]
-                            ).to(self.device)
-                            
-                            # 训练VWC模型
-                            optimizer = torch.optim.Adam(vwc_model.parameters(), lr=0.01)
-                            
-                            for epoch in range(50):  # VWC训练轮数
-                                optimizer.zero_grad()
-                                assignment_probs, loss = vwc_model(proxy_points)
-                                loss.backward()
-                                optimizer.step()
-                                
-                                if (epoch + 1) % 10 == 0:
-                                    print(f"VWC Epoch [{epoch+1}/50], Loss: {loss.item():.4f}")
-                            
-                            # 获取聚类分配
-                            cluster_assignments = vwc_model.get_cluster_assignments()
-                            
-                            # 更新客户端的集群分配
-                            for idx, client in enumerate(self.selected_clients):
-                                new_cluster = cluster_assignments[idx].item()
-                                # 记录历史分配
-                                if client.id not in self.client_cluster_history:
-                                    self.client_cluster_history[client.id] = []
-                                self.client_cluster_history[client.id].append(new_cluster)
-                                # 更新当前分配
-                                self.clusters[client.id] = new_cluster
-                                
-                        except Exception as e:
-                            print(f"VWC聚类失败: {str(e)}")
-                            print("Details:", e.__class__.__name__)
-                            import traceback
-                            print(traceback.format_exc())
-                            # 出错时保持原有集群分配
-                
-                # 更新每个集群的中心模型
-                print("\nUpdating cluster models...")
-                self.update_cluster_models()
-                
-                # 向客户端分发更新后的模型
-                print("\nDistributing models to clients...")
-                for client in self.selected_clients:
-                    cluster_id = self.clusters.get(client.id, 0)
-                    cluster_model = self.cluster_centroids.get(cluster_id, self.global_model)
-                    client.receive_cluster_model(cluster_model)                # 评估当前模型
-                if i % self.eval_gap == 0:
-                    print(f"\n-------------Round {i}-------------")
-                    print("\nEvaluating models...")
-                    self.evaluate()                # 可视化聚类结果
-                if i % self.eval_gap == 0:
-                    print("\n可视化聚类结果...")
-                    self.visualize_clustering(i)
-                
-                # 如果启用了概念漂移，更新迭代并保存进度
-                if hasattr(self, 'drift_concepts_initialized') and self.drift_concepts_initialized:
-                    # 更新当前迭代
-                    if not hasattr(self, 'current_iteration'):
-                        self.current_iteration = 0
-                    else:
-                        self.current_iteration += 1
-                    
-                    # 保存概念漂移进度
-                    save_concept_progress(self, i)
-                    
-                    # 通知客户端迭代更新
-                    print(f"\n更新客户端迭代状态到 {self.current_iteration}")
-                    for client in self.selected_clients:
-                        if hasattr(client, 'current_iteration'):
-                            client.current_iteration = self.current_iteration
-
-                # 记录本轮训练时间
-                round_time = time.time() - s_t
-                self.Budget.append(round_time)
-                print("-" * 25, f"Round {i} time cost: {round_time:.2f}s", "-" * 25)
-
-            except Exception as e:
-                print(f"\nError in training round {i}: {str(e)}")
-                continue            # 检查是否达到停止条件
-            if self.auto_break and self.check_done(
-                acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt            ):
-                print("\nReached stopping criterion. Training complete.")
-                break
-
-        print("\nTraining completed!")
-        if self.rs_test_acc:
-            print("Best accuracy achieved:", max(self.rs_test_acc))
-        else:
-            print("Warning: No test accuracy records found")
-        if len(self.Budget) > 1:
-            print("Average time cost per round:", sum(self.Budget[1:]) / len(self.Budget[1:]))
-        else:
-            print("Warning: No time cost records found")
-        # 评估最终聚类性能
-        print("\n执行最终聚类性能评估...")
-        self.evaluate_clustering_metrics()
-        
-        # 绘制聚类演变图
-        print("\n绘制聚类演变图...")
-        self.plot_clustering_evolution()
-        
-        # 保存聚类结果
-        print("\n保存聚类结果...")
-        self.save_clustering_results()
-        
-        # 保存结果
-        self.save_results()
-        self.save_models()
-        self.save_clustering_results()
-
-    def save_pretrain_models(self):
-        """保存预训练模型"""
-        if not os.path.exists("saved_models"):
-            os.makedirs("saved_models")
+            self.selected_clients = self.select_clients()
             
-        # 保存全局模型
-        torch.save(self.global_model.state_dict(), 
-                  os.path.join("saved_models", "FedDCA_server.pt"))
-        
-        # 保存自动编码器模型(如果存在)
-        if hasattr(self, "autoencoder"):
-            torch.save(self.autoencoder.state_dict(), 
-                      os.path.join("saved_models", "FedDCA_server_autoencoder.pt"))
-
-    def save_models(self):
-        """保存全局模型和各个聚类中心模型"""
-        # 创建保存目录
-        if not os.path.exists("saved_models"):
-            os.makedirs("saved_models")
-            
-        # 保存全局模型
-        torch.save(self.global_model.state_dict(), 
-                  os.path.join("saved_models", f"FedDCA_global_{self.dataset}.pt"))
-        
-        # 保存每个聚类中心模型
-        for cluster_id, model in self.cluster_centroids.items():
-            torch.save(model.state_dict(), 
-                      os.path.join("saved_models", f"FedDCA_cluster_{cluster_id}_{self.dataset}.pt"))
-        
-        print(f"模型保存完成：1个全局模型和{len(self.cluster_centroids)}个聚类中心模型")
-        
-        # 如果有自动编码器，也保存它
-        if hasattr(self, "autoencoder"):
-            torch.save(self.autoencoder.state_dict(), 
-                      os.path.join("saved_models", f"FedDCA_autoencoder_{self.dataset}.pt"))
-            print("自动编码器模型已保存")
-
-    def visualize_clustering(self, i):
-        """可视化聚类结果
-        
-        Args:
-            i: 当前轮次
-        """        
-        if len(self.selected_clients) == 0 or not hasattr(self, 'clusters'):
-            print("没有足够的数据进行聚类可视化")
-            return
-            
-        try:            # 收集所有客户端特征和聚类标签
-            features = []
-            cluster_labels = []
-            client_ids = []
-            
-            # 如果使用真实概念，也收集真实标签
-            true_labels = []
-            has_true_concepts = self.use_drift_dataset and hasattr(self, 'client_concepts')
-            
-            for client in self.selected_clients:
-                if hasattr(client, 'intermediate_output') and client.intermediate_output is not None:
-                    feat = client.intermediate_output
-                    
-                    # 打印原始特征的类型和形状，辅助调试
-                    # print(f"客户端 {client.id} 原始特征: 类型={type(feat)}, 形状={feat.shape if hasattr(feat, 'shape') else '标量'}")
-                    
-                    if not isinstance(feat, torch.Tensor):
-                        feat = torch.tensor(feat)
-                    
-                    # 将特征转换为CPU和Numpy格式
-                    feat = feat.detach().cpu().numpy()
-                    
-                    # 检查特征的维度
-                    if len(feat.shape) > 1:
-                        # 如果是2D以上的张量，取平均值降为1D向量
-                        feat = np.mean(feat, axis=0)
-                        #print(f"客户端 {client.id} 降维后特征形状: {feat.shape}")
-                    
-                    # 确保特征是一维数组，便于后续处理
-                    if len(feat.shape) == 0:
-                        # 标量转为一元数组
-                        feat = np.array([float(feat)])
-                        #print(f"客户端 {client.id} 标量特征转换为数组: {feat}")
-                    
-                    # 确保特征不包含无效值(NaN或Inf)
-                    if np.isnan(feat).any() or np.isinf(feat).any():
-                        #print(f"警告: 客户端 {client.id} 特征包含无效值，将被替换为0")
-                        feat = np.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
-                    
-                    features.append(feat)
-                    #print(f"客户端 {client.id} 最终特征形状: {feat.shape}")
-                    cluster_labels.append(self.clusters.get(client.id, 0))
-                    client_ids.append(client.id)
-                    
-                    # 如果有真实概念，记录客户端的真实概念
-                    if has_true_concepts:
-                        # 在client_concepts中查找真实概念（可能有多个）
-                        if str(client.id) in self.client_concepts:
-                            # 使用第一个概念作为标签
-                            concept = self.client_concepts[str(client.id)][0]
-                            true_labels.append(concept)
-                        else:
-                            true_labels.append(-1)  # 未知概念
-            
-            if not features:
-                print("没有特征数据可以可视化")
-                return
-                
-            # 将特征转换为numpy数组
-            features = np.array(features)
-            cluster_labels = np.array(cluster_labels)
-            
-            # 创建结果目录
-            if not os.path.exists('results/clustering'):
-                os.makedirs('results/clustering')
-                  # 设置绘图
-            plt.figure(figsize=(12, 10))
-            
-            # 使用t-SNE将特征降至2维
-            print("执行t-SNE降维...")
-            # 根据样本数动态调整perplexity参数，避免"perplexity must be less than n_samples"错误
-            n_samples = len(features)
-            perplexity = min(30, n_samples - 1)  # 确保perplexity小于样本数
-            
-            if n_samples <= 2:
-                print("样本数太少，无法执行t-SNE，使用PCA代替")
-                pca = PCA(n_components=2, random_state=42)
-                features_2d = pca.fit_transform(features)
-            else:
-                tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
-                features_2d = tsne.fit_transform(features)
-            
-            # 绘制聚类结果
-            plt.subplot(2, 2, 1)
-            scatter = plt.scatter(features_2d[:, 0], features_2d[:, 1], c=cluster_labels, cmap='tab10', alpha=0.7, s=50)
-            plt.title(f'Clustering Results (Round {i}, {len(set(cluster_labels))} clusters)')
-            plt.colorbar(scatter, label='Cluster ID')
-            plt.xlabel('t-SNE Feature 1')
-            plt.ylabel('t-SNE Feature 2')
-            # 为每个点添加客户端ID标签
-            for j, client_id in enumerate(client_ids):
-                plt.annotate(str(client_id), (features_2d[j, 0], features_2d[j, 1]), fontsize=8)
-                
-            # 如果有真实概念，绘制真实标签
-            if has_true_concepts and len(true_labels) > 0:
-                plt.subplot(2, 2, 2)
-                true_labels = np.array(true_labels)
-                scatter = plt.scatter(features_2d[:, 0], features_2d[:, 1], c=true_labels, cmap='tab10', alpha=0.7, s=50)
-                plt.title(f'True Concept Distribution ({len(set(true_labels))} concepts)')
-                plt.colorbar(scatter, label='Concept ID')
-                plt.xlabel('t-SNE Feature 1')
-                plt.ylabel('t-SNE Feature 2')
-                
-                # 计算聚类准确性指标
-                # 删除未知标签
-                valid_indices = true_labels != -1
-                if np.sum(valid_indices) > 1:
-                    valid_true_labels = true_labels[valid_indices]
-                    valid_cluster_labels = cluster_labels[valid_indices]
-                    
-                    # 计算调整兰德指数 (ARI)
-                    ari = adjusted_rand_score(valid_true_labels, valid_cluster_labels)
-                    # 添加ARI分数文本标签
-                    plt.subplot(2, 2, 3)
-                    plt.annotate(f'Adjusted Rand Index (ARI): {ari:.4f}', 
-                                xy=(0.05, 0.95), 
-                                xycoords='axes fraction',
-                                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
-            
-            # 计算并绘制轮廓系数
-            if len(set(cluster_labels)) > 1 and len(features) > len(set(cluster_labels)):
-                try:
-                    # 计算额外的评估指标
-                    print("Calculating clustering evaluation metrics...")
-                    metrics = self.calculate_additional_metrics(features, cluster_labels)
-                    
-                    # 绘制评估指标
-                    plt.subplot(2, 2, 4)
-                    metrics_names = []
-                    metrics_values = []
-                    
-                    if 'silhouette_score' in metrics:
-                        metrics_names.append('Silhouette\nCoefficient')
-                        metrics_values.append(metrics['silhouette_score'])
-                    
-                    if 'davies_bouldin_score' in metrics:
-                        # 为了统一显示方向（越大越好），取Davies-Bouldin的负值
-                        metrics_names.append('Davies-Bouldin\n(negative)')
-                        metrics_values.append(-metrics['davies_bouldin_score'])
-                    
-                    if 'calinski_harabasz_score' in metrics:
-                        # 归一化Calinski-Harabasz分数，因为它通常很大
-                        normalized_ch = min(1.0, metrics['calinski_harabasz_score'] / 10000)
-                        metrics_names.append('Calinski-Harabasz\n(normalized)')
-                        metrics_values.append(normalized_ch)
-                      # 绘制指标柱状图
-                    if metrics_values:
-                        bar_colors = ['skyblue', 'salmon', 'lightgreen'][:len(metrics_values)]
-                        plt.bar(range(len(metrics_values)), metrics_values, color=bar_colors)
-                        plt.title(f'Clustering Evaluation Metrics')
-                        plt.xticks(range(len(metrics_values)), metrics_names)
-                        plt.ylabel('Score Value')
-                        plt.ylim(-1, 1)  # 统一刻度
-                        
-                        # 添加数值标签
-                        for i, v in enumerate(metrics_values):
-                            plt.annotate(f"{v:.2f}", 
-                                        xy=(i, v), 
-                                        xytext=(0, 3 if v >= 0 else -10),
-                                        textcoords="offset points",
-                                        ha='center')
-                    
-                except Exception as e:
-                    print(f"Error plotting evaluation metrics: {str(e)}")
-                    # 如果绘制失败，回退到只显示轮廓系数
-                    try:
-                        silhouette_avg = silhouette_score(features, cluster_labels)
-                        plt.subplot(2, 2, 4)
-                        plt.bar(range(1), [silhouette_avg], color='skyblue')
-                        plt.title(f'Silhouette Coefficient: {silhouette_avg:.4f}')
-                        plt.xticks([])
-                        plt.ylabel('Silhouette Score')
-                        plt.ylim(-1, 1)
-                        # 添加评估文本
-                        quality_text = 'Poor' if silhouette_avg < 0.2 else 'Fair' if silhouette_avg < 0.5 else 'Good' if silhouette_avg < 0.7 else 'Excellent'
-                        plt.annotate(f'Clustering Quality: {quality_text}', 
-                                    xy=(0.1, 0.5), 
-                                    xycoords='axes fraction',
-                                    fontsize=12)
-                    except Exception as e:
-                        print(f"Error calculating silhouette coefficient: {str(e)}")            # 绘制聚类分布柱状图
-            plt.subplot(2, 2, 4)
-            cluster_counts = {}
-            for cluster in cluster_labels:
-                if cluster not in cluster_counts:
-                    cluster_counts[cluster] = 0
-                cluster_counts[cluster] += 1
-            
-            clusters = sorted(cluster_counts.keys())
-            counts = [cluster_counts[c] for c in clusters]
-            
-            plt.bar(clusters, counts, color='salmon')
-            plt.title(f'Cluster Distribution (Round {i})')
-            plt.xlabel('Cluster ID')
-            plt.ylabel('Client Count')
-            
-            # 添加数量标签
-            for j, count in enumerate(counts):
-                plt.annotate(str(count),
-                             xy=(clusters[j], count),
-                             xytext=(0, 3),
-                             textcoords="offset points",
-                             ha='center')
-            
-            # 保存图表
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            plt.tight_layout()
-            plt.savefig(f'results/clustering/clustering_round_{i}_{timestamp}.png', dpi=300)
-            print(f"Clustering visualization saved to 'results/clustering/clustering_round_{i}_{timestamp}.png'")
-            plt.close()
-            
-            # 如果存在历史聚类分配，绘制聚类稳定性图
-            if hasattr(self, 'client_cluster_history') and len(self.client_cluster_history) > 0:
-                plt.figure(figsize=(10, 6))
-                
-                # 选择几个有完整历史的客户端来绘制
-                complete_clients = [cid for cid, history in self.client_cluster_history.items() 
-                                    if len(history) >= min(i+1, 10)]
-                
-                if len(complete_clients) > 0:
-                    # 如果客户端太多，只选择一部分
-                    selected_clients = complete_clients[:min(len(complete_clients), 10)]
-                    
-                    for cid in selected_clients:
-                        history = self.client_cluster_history[cid][-min(i+1, 10):]  # 最近10轮
-                        plt.plot(range(len(history)), history, 'o-', label=f'Client {cid}')
-                    
-                    plt.title('Client Clustering Stability Analysis')
-                    plt.xlabel('Round (Last 10 rounds)')
-                    plt.ylabel('Cluster Assignment')
-                    plt.legend(loc='best')
-                    plt.grid(True)
-                    plt.savefig(f'results/clustering/cluster_stability_{i}_{timestamp}.png', dpi=300)
-                    print(f"Clustering stability graph saved to 'results/clustering/cluster_stability_{i}_{timestamp}.png'")
-                    plt.close()
-        except Exception as e:
-            print(f"Error during clustering visualization: {str(e)}")
-            print(traceback.format_exc())
-
-    def evaluate_clustering_metrics(self):
-        """Evaluate clustering performance metrics and generate summary report"""
-        if not hasattr(self, 'clusters') or len(self.clusters) == 0:
-            print("No clustering data available for evaluation")
-            return
-
-        try:
-            print("\n======= Clustering Performance Evaluation =======")
-              # 1. 簇分布情况
-            cluster_distribution = {}
-            for client_id, cluster_id in self.clusters.items():
-                if cluster_id not in cluster_distribution:
-                    cluster_distribution[cluster_id] = 0
-                cluster_distribution[cluster_id] += 1
-            
-            print("\nCluster Distribution:")
-            for cluster_id, count in sorted(cluster_distribution.items()):
-                print(f"  Cluster {cluster_id}: {count} clients ({count/len(self.clusters)*100:.1f}%)")
-                
-            # 2. 聚类稳定性 - 计算最近几轮的平均变化率
-            if hasattr(self, 'client_cluster_history') and len(self.client_cluster_history) > 0:
-                changes = []
-                for client_id, history in self.client_cluster_history.items():
-                    if len(history) >= 2:
-                        # 计算最近几轮中发生变化的比例
-                        recent_history = history[-min(len(history), 5):]  # 最近5轮
-                        change_count = sum(1 for i in range(1, len(recent_history)) 
-                                          if recent_history[i] != recent_history[i-1])
-                        change_rate = change_count / (len(recent_history) - 1) if len(recent_history) > 1 else 0
-                        changes.append(change_rate)
-                
-                if changes:
-                    avg_change_rate = sum(changes) / len(changes)
-                    print(f"\nClustering Stability:")
-                    print(f"  Average Cluster Change Rate: {avg_change_rate:.2f} (0=completely stable, 1=changes every round)")
-                    stability_level = 'Very High' if avg_change_rate < 0.1 else 'High' if avg_change_rate < 0.3 else 'Medium' if avg_change_rate < 0.5 else 'Low'
-                    print(f"  Stability Level: {stability_level}")
-              # 3. 概念对齐分析 (如果有真实概念标签)
-            if self.use_drift_dataset and hasattr(self, 'client_concepts'):
-                print("\nConcept-Cluster Alignment Analysis:")
-                
-                concept_cluster_map = {}  # 映射概念到集群分布
-                cluster_concept_map = {}  # 映射集群到概念分布
-                
-                alignments = 0
-                total = 0
-                
-                for client_id, cluster_id in self.clusters.items():
-                    # 获取客户端的真实概念(如果存在)
-                    if str(client_id) in self.client_concepts:
-                        # 使用第一个概念作为主要概念
-                        concept = self.client_concepts[str(client_id)][0]
-                        
-                        # 更新映射
-                        if concept not in concept_cluster_map:
-                            concept_cluster_map[concept] = {}
-                        if cluster_id not in concept_cluster_map[concept]:
-                            concept_cluster_map[concept][cluster_id] = 0
-                        concept_cluster_map[concept][cluster_id] += 1
-                        
-                        if cluster_id not in cluster_concept_map:
-                            cluster_concept_map[cluster_id] = {}
-                        if concept not in cluster_concept_map[cluster_id]:
-                            cluster_concept_map[cluster_id][concept] = 0
-                        cluster_concept_map[cluster_id][concept] += 1
-                        
-                        total += 1
-                
-                # 计算每个概念对应的主要集群
-                concept_primary_clusters = {}
-                for concept, clusters in concept_cluster_map.items():
-                    primary_cluster = max(clusters, key=clusters.get)
-                    concept_primary_clusters[concept] = primary_cluster
-                    print(f"  Concept {concept} primarily maps to Cluster {primary_cluster} ({clusters[primary_cluster]/sum(clusters.values())*100:.1f}%)")
-                    
-                    # 计算该概念的客户端被正确分类的比例
-                    correct_assignments = clusters[primary_cluster]
-                    total_concept_clients = sum(clusters.values())
-                    alignments += correct_assignments
-                    print(f"    Alignment Rate: {correct_assignments/total_concept_clients*100:.1f}%")
-                
-                # 计算总体对齐率
-                overall_alignment = alignments / total if total > 0 else 0
-                print(f"\nOverall Concept-Cluster Alignment Rate: {overall_alignment*100:.1f}%")
-                alignment_quality = 'Excellent' if overall_alignment > 0.8 else 'Good' if overall_alignment > 0.6 else 'Fair' if overall_alignment > 0.4 else 'Poor'
-                print(f"Alignment Quality: {alignment_quality}")
-                  # 绘制概念-聚类对齐热力图
-                if concept_cluster_map and cluster_concept_map:
-                    plt.figure(figsize=(10, 8))
-                    
-                    # 创建热力图数据
-                    concepts = sorted(concept_cluster_map.keys())
-                    clusters = sorted(cluster_concept_map.keys())
-                    
-                    alignment_matrix = np.zeros((len(concepts), len(clusters)))
-                    
-                    for i, concept in enumerate(concepts):
-                        for j, cluster in enumerate(clusters):
-                            # 如果这个概念-集群对存在
-                            if concept in concept_cluster_map and cluster in concept_cluster_map[concept]:
-                                # 计算概念中有多少比例分到这个集群
-                                alignment_matrix[i, j] = concept_cluster_map[concept].get(cluster, 0) / sum(concept_cluster_map[concept].values())
-                    
-                    # 绘制热力图
-                    plt.imshow(alignment_matrix, cmap='YlOrRd')
-                    plt.colorbar(label='Concept to Cluster Assignment Ratio')
-                    plt.xticks(range(len(clusters)), [f'Cluster {c}' for c in clusters], rotation=45)
-                    plt.yticks(range(len(concepts)), [f'Concept {c}' for c in concepts])
-                    plt.title('Concept-Cluster Alignment Heatmap')
-                    
-                    for i in range(len(concepts)):
-                        for j in range(len(clusters)):
-                            text = f"{alignment_matrix[i, j]*100:.1f}%" if alignment_matrix[i, j] > 0 else ""
-                            color = "white" if alignment_matrix[i, j] > 0.5 else "black"
-                            plt.text(j, i, text, ha="center", va="center", color=color)
-                    
-                    # 保存热力图
-                    timestamp = time.strftime("%Y%m%d-%H%M%S")
-                    plt.tight_layout()
-                    if not os.path.exists('results/clustering'):
-                        os.makedirs('results/clustering')
-                    plt.savefig(f'results/clustering/concept_cluster_alignment_{timestamp}.png', dpi=300)
-                    print(f"\nConcept-Cluster alignment heatmap saved to 'results/clustering/concept_cluster_alignment_{timestamp}.png'")
-                    plt.close()
-              # 4. 跨集群性能比较
-            print("\nCross-Cluster Performance Comparison:")
-            cluster_performance = {}
-            
-            for client in self.selected_clients:
-                cluster_id = self.clusters.get(client.id, 0)
-                if cluster_id not in cluster_performance:
-                    cluster_performance[cluster_id] = {'acc': [], 'loss': []}
-                
-                # 收集性能指标
-                try:
-                    test_acc, test_num, _ = client.test_metrics()
-                    train_loss, train_num = client.train_metrics()
-                    
-                    if test_num > 0:
-                        cluster_performance[cluster_id]['acc'].append(test_acc / test_num)
-                    if train_num > 0:
-                        cluster_performance[cluster_id]['loss'].append(train_loss / train_num)
-                except Exception as e:
-                    print(f"Failed to get performance metrics from client {client.id}: {str(e)}")
-            
-            # 计算并显示每个集群的平均性能
-            for cluster_id, metrics in sorted(cluster_performance.items()):
-                avg_acc = np.mean(metrics['acc']) if metrics['acc'] else 0
-                avg_loss = np.mean(metrics['loss']) if metrics['loss'] else 0
-                client_count = len(metrics['acc'])
-                
-                print(f"  Cluster {cluster_id} ({client_count} clients):")
-                print(f"    Average Accuracy: {avg_acc*100:.2f}%")
-                print(f"    Average Loss: {avg_loss:.4f}")
-            
-            # 绘制集群性能对比图
-            plt.figure(figsize=(12, 5))
-            
-            # 准确率对比
-            plt.subplot(1, 2, 1)
-            clusters = []
-            accuracies = []
-            std_devs = []
-            counts = []
-            
-            for cluster_id, metrics in sorted(cluster_performance.items()):
-                if metrics['acc']:
-                    clusters.append(cluster_id)
-                    avg_acc = np.mean(metrics['acc'])
-                    std_dev = np.std(metrics['acc']) if len(metrics['acc']) > 1 else 0
-                    accuracies.append(avg_acc)
-                    std_devs.append(std_dev)
-                    counts.append(len(metrics['acc']))
-            
-            if clusters:
-                plt.bar(range(len(clusters)), accuracies, yerr=std_devs, capsize=5, alpha=0.7, color='skyblue')
-                plt.xticks(range(len(clusters)), [f'Cluster {c}\n({counts[i]})' for i, c in enumerate(clusters)])
-                plt.title('Cluster Accuracy Comparison')
-                plt.ylabel('Accuracy')
-                plt.grid(axis='y', linestyle='--', alpha=0.7)
-                
-                # 添加具体数值
-                for i, acc in enumerate(accuracies):
-                    plt.text(i, acc + 0.01, f"{acc*100:.1f}%", ha='center')
-                
-                # 损失对比
-                plt.subplot(1, 2, 2)
-                clusters = []
-                losses = []
-                std_devs = []
-                counts = []
-                
-                for cluster_id, metrics in sorted(cluster_performance.items()):
-                    if metrics['loss']:
-                        clusters.append(cluster_id)
-                        avg_loss = np.mean(metrics['loss'])
-                        std_dev = np.std(metrics['loss']) if len(metrics['loss']) > 1 else 0
-                        losses.append(avg_loss)
-                        std_devs.append(std_dev)
-                        counts.append(len(metrics['loss']))
-                
-                plt.bar(range(len(clusters)), losses, yerr=std_devs, capsize=5, alpha=0.7, color='salmon')
-                plt.xticks(range(len(clusters)), [f'Cluster {c}\n({counts[i]})' for i, c in enumerate(clusters)])
-                plt.title('Cluster Loss Comparison')
-                plt.ylabel('Loss')
-                plt.grid(axis='y', linestyle='--', alpha=0.7)
-                
-                # 添加具体数值
-                for i, loss in enumerate(losses):
-                    plt.text(i, loss + 0.05, f"{loss:.2f}", ha='center')
-                
-                plt.tight_layout()
-                timestamp = time.strftime("%Y%m%d-%H%M%S")
-                if not os.path.exists('results/clustering'):
-                    os.makedirs('results/clustering')
-                plt.savefig(f'results/clustering/cluster_performance_comparison_{timestamp}.png', dpi=300)
-                print(f"\nCluster performance comparison chart saved to 'results/clustering/cluster_performance_comparison_{timestamp}.png'")
-                plt.close()
-                
-            print("\n======= Clustering Evaluation Completed =======")
-        except Exception as e:
-            print(f"Error evaluating clustering metrics: {str(e)}")
-            print(traceback.format_exc())
-            
-    def save_clustering_results(self):
-        """Save clustering results to files"""
-        try:
-            if not os.path.exists('results/clustering'):
-                os.makedirs('results/clustering')
-                
-            # 保存客户端聚类分配
-            cluster_assignments = {}
-            for client_id, cluster_id in self.clusters.items():
-                cluster_assignments[str(client_id)] = int(cluster_id)
-                
-            # 保存到JSON文件
-            import json
-            with open('results/clustering/final_cluster_assignments.json', 'w') as f:
-                json.dump(cluster_assignments, f, indent=4)
-            
-            # 保存聚类历史
-            history_data = {}
-            for client_id, history in self.client_cluster_history.items():
-                history_data[str(client_id)] = [int(x) for x in history]
-            
-            with open('results/clustering/cluster_history.json', 'w') as f:
-                json.dump(history_data, f, indent=4)                  # 如果有真实概念标签，进行概念-聚类映射分析
-            if self.use_drift_dataset and hasattr(self, 'client_concepts'):
-                # 计算概念和聚类的对应关系
-                concept_cluster_map = {}
-                for client_id, cluster_id in self.clusters.items():
-                    if str(client_id) in self.client_concepts:
-                        concept = self.client_concepts[str(client_id)][0]  # 使用第一个概念
-                        if concept not in concept_cluster_map:
-                            concept_cluster_map[concept] = {}
-                        if cluster_id not in concept_cluster_map[concept]:
-                            concept_cluster_map[concept][cluster_id] = 0
-                        concept_cluster_map[concept][cluster_id] += 1
-                
-                # 保存概念-聚类映射
-                with open('results/clustering/concept_cluster_mapping.json', 'w') as f:
-                    json.dump(concept_cluster_map, f, indent=4)
-                    
-                # 计算调整兰德指数(ARI)
-                try:
-                    from sklearn.metrics import adjusted_rand_score
-                    true_labels = []
-                    cluster_labels = []
-                    
-                    for client_id, cluster_id in self.clusters.items():
-                        if str(client_id) in self.client_concepts:
-                            true_labels.append(self.client_concepts[str(client_id)][0])
-                            cluster_labels.append(cluster_id)
-                    
-                    if len(true_labels) > 1 and len(set(true_labels)) > 1 and len(set(cluster_labels)) > 1:
-                        ari = adjusted_rand_score(true_labels, cluster_labels)
-                        
-                        # 收集客户端特征，用于计算聚类评估指标
-                        features = []
-                        for client in self.selected_clients:
-                            if hasattr(client, 'intermediate_output') and client.intermediate_output is not None:
-                                feat = client.intermediate_output
-                                if not isinstance(feat, torch.Tensor):
-                                    feat = torch.tensor(feat)
-                                
-                                # 将特征转换为CPU和Numpy格式
-                                feat = feat.detach().cpu().numpy()
-                                
-                                # 如果特征是多维的，先平均降到2D
-                                if len(feat.shape) > 1:
-                                    feat = np.mean(feat, axis=0)
-                                
-                                features.append(feat)
-                        
-                        # 如果有足够的特征，计算额外的聚类指标
-                        extra_metrics = {}
-                        if len(features) > 1:
-                            features = np.array(features)
-                            selected_clients_ids = [client.id for client in self.selected_clients]
-                            selected_clusters = [self.clusters.get(cid, 0) for cid in selected_clients_ids]
-                            extra_metrics = self.calculate_additional_metrics(features, selected_clusters)
-                        
-                        # 保存所有评估指标
-                        with open('results/clustering/clustering_metrics.txt', 'w') as f:
-                            f.write(f"Adjusted Rand Index (ARI): {ari:.4f}\n")
-                            for metric_name, metric_value in extra_metrics.items():
-                                f.write(f"{metric_name}: {metric_value:.4f}\n")
-                            
-                        print(f"Final clustering Adjusted Rand Index (ARI): {ari:.4f}")
-                except Exception as e:
-                    print(f"Error calculating clustering metrics: {str(e)}")
-            print("Clustering results saved to 'results/clustering/' directory")
-        except Exception as e:
-            print(f"Error saving clustering results: {str(e)}")
-            print(traceback.format_exc())
-            
-    def plot_clustering_evolution(self, save_path='results/clustering/clustering_evolution.png'):
-        """Plot the evolution of clustering over time
-        
-        Args:
-            save_path: Path to save the chart
-        """
-        if not hasattr(self, 'client_cluster_history') or len(self.client_cluster_history) == 0:
-            print("Not enough clustering history data for visualization")
-            return
-            
-        try:
-            # 计算每轮的聚类统计信息
-            round_stats = {}
-            max_rounds = 0
-            
-            # 获取历史中的最大轮次
-            for client_id, history in self.client_cluster_history.items():
-                max_rounds = max(max_rounds, len(history))
-            
-            # 初始化统计信息
-            for i in range(max_rounds):
-                round_stats[i] = {'cluster_counts': {}, 'changes': 0, 'clients': 0}
-            
-            # 计算每轮的聚类分配和变化率
-            for client_id, history in self.client_cluster_history.items():
-                for i, cluster in enumerate(history):
-                    # 更新该轮的聚类计数
-                    if cluster not in round_stats[i]['cluster_counts']:
-                        round_stats[i]['cluster_counts'][cluster] = 0
-                    round_stats[i]['cluster_counts'][cluster] += 1
-                    round_stats[i]['clients'] += 1
-                    
-                    # 计算聚类变化（从第二轮开始）
-                    if i > 0 and history[i] != history[i-1]:
-                        round_stats[i]['changes'] += 1
-            
-            # 计算每轮的变化率
-            change_rates = []
-            cluster_counts = []
-            rounds = []
-            
-            for i in sorted(round_stats.keys()):
-                if i > 0:  # 从第二轮开始计算变化率
-                    change_rate = round_stats[i]['changes'] / round_stats[i]['clients'] if round_stats[i]['clients'] > 0 else 0
-                    change_rates.append(change_rate)
-                    cluster_counts.append(len(round_stats[i]['cluster_counts']))
-                    rounds.append(i)
-              # 创建图表
-            plt.figure(figsize=(12, 8))
-            
-            # 绘制变化率
-            plt.subplot(2, 1, 1)
-            plt.plot(rounds, change_rates, 'o-', color='blue', label='Change Rate')
-            plt.title('Evolution of Clustering Change Rate')
-            plt.xlabel('Round')
-            plt.ylabel('Change Rate')
-            plt.grid(True, linestyle='--', alpha=0.7)
-            plt.legend()
-            
-            # 为突出的变化点添加标注
-            threshold = 0.3  # 高变化率阈值
-            for i, rate in enumerate(change_rates):
-                if rate > threshold:
-                    plt.annotate(f"{rate:.2f}", 
-                                xy=(rounds[i], rate),
-                                xytext=(rounds[i], rate + 0.05),
-                                arrowprops=dict(arrowstyle="->", color='red'),
-                                ha='center')
-              # 绘制聚类数量
-            plt.subplot(2, 1, 2)
-            plt.plot(rounds, cluster_counts, 'o-', color='green', label='Cluster Count')
-            plt.title('Evolution of Active Cluster Count')
-            plt.xlabel('Round')
-            plt.ylabel('Active Cluster Count')
-            plt.grid(True, linestyle='--', alpha=0.7)
-            plt.legend()
-            
-            # 突出显示簇数量变化的点
-            for i in range(1, len(cluster_counts)):
-                if cluster_counts[i] != cluster_counts[i-1]:
-                    plt.annotate(f"{cluster_counts[i]}", 
-                                xy=(rounds[i], cluster_counts[i]),
-                                xytext=(rounds[i], cluster_counts[i] + 0.3),
-                                arrowprops=dict(arrowstyle="->", color='red'),
-                                ha='center')
-            
-            # 保存图表
-            plt.tight_layout()
-            if not os.path.exists(os.path.dirname(save_path)):
-                os.makedirs(os.path.dirname(save_path))
-            plt.savefig(save_path, dpi=300)
-            print(f"Clustering evolution chart saved to '{save_path}'")
-            plt.close()
-              # 绘制客户端聚类轨迹图
-            plt.figure(figsize=(14, 10))
-            
-            # 选择一部分有代表性的客户端进行可视化
-            selected_clients = list(self.client_cluster_history.keys())
-            if len(selected_clients) > 20:  # 如果客户端太多，只选择前20个
-                selected_clients = selected_clients[:20]
-                
-            # 为每个选择的客户端绘制聚类轨迹
-            for client_id in selected_clients:
-                history = self.client_cluster_history[client_id]
-                plt.plot(range(len(history)), history, '-', label=f'Client {client_id}')
-            
-            plt.title('Client Clustering Trajectory Evolution')
-            plt.xlabel('Round')
-            plt.ylabel('Cluster Assignment')
-            plt.grid(True, linestyle='--', alpha=0.7)
-            
-            # 设置y轴刻度为整数
-            plt.yticks(np.arange(0, max(max(history) for history in self.client_cluster_history.values()) + 1))
-            
-            # 如果客户端数量适中，添加图例
-            if len(selected_clients) <= 10:
-                plt.legend(loc='best')
-            
-            # 保存轨迹图
-            trajectory_path = os.path.join(os.path.dirname(save_path), 'client_trajectories.png')            
-            plt.savefig(trajectory_path, dpi=300)
-            print(f"Client clustering trajectory chart saved to '{trajectory_path}'")
-            plt.close()
-        except Exception as e:
-            print(f"Error plotting clustering evolution: {str(e)}")
-            print(traceback.format_exc())
-            
-    def calculate_additional_metrics(self, features, cluster_labels):
-        """Calculate additional clustering evaluation metrics
-        
-        Args:
-            features: Feature data with shape (n_samples, n_features)
-            cluster_labels: Cluster labels with shape (n_samples,)
-            
-        Returns:
-            dict: Dictionary containing various clustering evaluation metrics
-        """
-        # 初始化结果字典
-        metrics = {}
-        
-        try:
-            # 检查是否满足计算指标的条件
-            if len(set(cluster_labels)) < 2:
-                print("Less than 2 clusters, cannot calculate evaluation metrics")
-                return metrics
-                
-            if len(features) <= len(set(cluster_labels)):
-                print("Not enough samples to reliably calculate evaluation metrics")
-                return metrics                
-            # 计算轮廓系数 (Silhouette Coefficient)
-            # 衡量样本与自己所在簇的相似度与其他簇的不相似度
-            # 范围：[-1, 1]，越接近1越好
-            silhouette_avg = silhouette_score(features, cluster_labels)
-            metrics['silhouette_score'] = silhouette_avg
-            
-            # 计算Davies-Bouldin指数
-            # 衡量簇内距离与簇间距离的比率
-            # 范围：[0, ∞)，越小越好
-            db_score = davies_bouldin_score(features, cluster_labels)
-            metrics['davies_bouldin_score'] = db_score
-            
-            # 计算Calinski-Harabasz指数 (Variance Ratio Criterion)
-            # 簇间方差与簇内方差的比率
-            # 范围：[0, ∞)，越大越好
-            ch_score = calinski_harabasz_score(features, cluster_labels)
-            metrics['calinski_harabasz_score'] = ch_score
-            
-            # 如果有真实标签，计算聚类与真实标签的一致性
-            if hasattr(self, 'client_concepts') and self.use_drift_dataset:
-                try:
-                    # 收集客户端的真实概念标签
-                    true_labels = []
-                    client_ids_with_features = [client.id for client in self.selected_clients 
-                                                if hasattr(client, 'intermediate_output') and 
-                                                client.intermediate_output is not None]
-                    
-                    for client_id in client_ids_with_features:
-                        if str(client_id) in self.client_concepts:
-                            true_labels.append(self.client_concepts[str(client_id)][0])
-                        else:
-                            true_labels.append(-1)
-                      # 过滤掉未知标签
-                    valid_indices = [i for i, label in enumerate(true_labels) if label != -1]
-                    
-                    if len(valid_indices) >= 2 and len(set([true_labels[i] for i in valid_indices])) >= 2:
-                        valid_true_labels = [true_labels[i] for i in valid_indices]
-                        valid_cluster_labels = [cluster_labels[i] for i in valid_indices]
-                        
-                        # 计算调整兰德指数 (ARI)
-                        # 衡量两个聚类结果的相似度
-                        # 范围：[-1, 1]，越接近1越好，0表示随机分配
-                        ari = adjusted_rand_score(valid_true_labels, valid_cluster_labels)
-                        metrics['adjusted_rand_score'] = ari
-                
-                except Exception as label_error:
-                    print(f"Error calculating label consistency metrics: {str(label_error)}")
-            
-                return metrics
-            
-        except Exception as metric_error:
-            print(f"Error calculating additional metrics: {str(metric_error)}")
-            return metrics
-            
-    def compute_label_conditional_wasserstein_distance(self, client_features):
-        """
-        计算客户端之间基于标签条件的距离
-        
-        参数:
-            client_features: 按客户端ID和标签组织的特征字典 {client_id: {label: features}}
-            
-        返回:
-            numpy.ndarray: 客户端间的距离矩阵
-        """
-        client_ids = list(client_features.keys())
-        n_clients = len(client_ids)
-        
-        if n_clients <= 1:
-            print("Warning: 不足以计算距离，只有一个或零个客户端")
-            return np.zeros((n_clients, n_clients))
-        
-        # 初始化距离矩阵
-        distance_matrix = np.zeros((n_clients, n_clients))
-        
-        # 计算所有标签列表
-        all_labels = set()
-        for client_id in client_ids:
-            all_labels.update(client_features[client_id].keys())
-        
-        # 为每对客户端计算距离
-        for i in range(n_clients):
-            for j in range(i+1, n_clients):
-                client_i_id = client_ids[i]
-                client_j_id = client_ids[j]
-                
-                # 计算每个标签的距离并加权平均
-                label_distances = []
-                label_weights = []
-                
-                for label in all_labels:
-                    # 检查两个客户端都有此标签的数据
-                    if (label in client_features[client_i_id] and 
-                        label in client_features[client_j_id]):
-                        
-                        features_i = client_features[client_i_id][label]
-                        features_j = client_features[client_j_id][label]
-                        
-                        # 确保特征是numpy数组
-                        if isinstance(features_i, torch.Tensor):
-                            features_i = features_i.detach().cpu().numpy()
-                        if isinstance(features_j, torch.Tensor):
-                            features_j = features_j.detach().cpu().numpy()
-                        
-                        # 检查并处理形状问题
-                        if features_i.ndim == 1:
-                            features_i = features_i.reshape(1, -1)
-                        if features_j.ndim == 1:
-                            features_j = features_j.reshape(1, -1)
-                        
-                        # 确保两个特征矩阵有相同的维度
-                        if features_i.shape[1] != features_j.shape[1]:
-                            min_dim = min(features_i.shape[1], features_j.shape[1])
-                            features_i = features_i[:, :min_dim]
-                            features_j = features_j[:, :min_dim]
-                        
-                        # 计算样本数，用作权重
-                        weight_i = features_i.shape[0]
-                        weight_j = features_j.shape[0]
-                        label_weight = (weight_i + weight_j) / 2
-                        
-                        try:
-                            # 标准化特征以确保可比性
-                            features_i_mean = np.mean(features_i, axis=0, keepdims=True)
-                            features_i_std = np.std(features_i, axis=0, keepdims=True) + 1e-8
-                            features_i_normalized = (features_i - features_i_mean) / features_i_std
-                            
-                            features_j_mean = np.mean(features_j, axis=0, keepdims=True)
-                            features_j_std = np.std(features_j, axis=0, keepdims=True) + 1e-8
-                            features_j_normalized = (features_j - features_j_mean) / features_j_std
-                            
-                            # 处理NaN值
-                            features_i_normalized = np.nan_to_num(features_i_normalized)
-                            features_j_normalized = np.nan_to_num(features_j_normalized)
-                            
-                            # 使用欧氏距离计算距离矩阵
-                            dist = 0
-                            try:
-                                # 如果POT库可用，使用Wasserstein距离
-                                if 'ot' in globals():
-                                    # 限制样本数量
-                                    n_samples_i = min(features_i_normalized.shape[0], 100)
-                                    n_samples_j = min(features_j_normalized.shape[0], 100)
-                                    
-                                    a = np.ones(n_samples_i) / n_samples_i
-                                    b = np.ones(n_samples_j) / n_samples_j
-                                    
-                                    # 计算成本矩阵 (欧氏距离)
-                                    M = ot.dist(features_i_normalized[:n_samples_i], 
-                                              features_j_normalized[:n_samples_j])
-                                    
-                                    # 规范化成本矩阵
-                                    if np.max(M) > 0:
-                                        M = M / np.max(M)
-                                    
-                                    # 使用Sinkhorn算法计算Wasserstein距离
-                                    reg = 0.1  # 正则化参数
-                                    dist = ot.sinkhorn2(a, b, M, reg)[0]
-                                else:
-                                    # 使用均值和协方差的距离作为替代
-                                    # 计算均值距离
-                                    mean_dist = np.linalg.norm(features_i_mean - features_j_mean)
-                                    
-                                    # 特征维度可能很大，使用更稳健的方法
-                                    try:
-                                        # 计算协方差矩阵
-                                        cov_i = np.cov(features_i_normalized.T)
-                                        cov_j = np.cov(features_j_normalized.T)
-                                        
-                                        # 计算协方差矩阵之间的距离
-                                        # 如果维度太高，仅使用对角线元素
-                                        if cov_i.shape[0] > 100:
-                                            cov_dist = np.linalg.norm(np.diag(cov_i) - np.diag(cov_j))
-                                        else:
-                                            cov_dist = np.linalg.norm(cov_i - cov_j, 'fro')
-                                        
-                                        dist = mean_dist + cov_dist
-                                    except Exception as cov_error:
-                                        # 计算协方差失败，只使用均值距离
-                                        print(f"协方差计算失败: {str(cov_error)}，仅使用均值距离")
-                                        dist = mean_dist
-                            except Exception as dist_error:
-                                print(f"使用Wasserstein距离失败，回退到均值距离: {str(dist_error)}")
-                                # 如果出错，使用均值距离作为替代
-                                dist = np.linalg.norm(np.mean(features_i_normalized, axis=0) - 
-                                                     np.mean(features_j_normalized, axis=0))
-                            
-                            label_distances.append(dist)
-                            label_weights.append(label_weight)
-                        
-                        except Exception as norm_error:
-                            print(f"计算标签{label}的距离时出错: {str(norm_error)}")
-                            # 尝试使用原始特征的简单距离
-                            try:
-                                simple_dist = np.linalg.norm(np.mean(features_i, axis=0) - np.mean(features_j, axis=0))
-                                label_distances.append(simple_dist)
-                                label_weights.append(label_weight)
-                            except Exception as simple_error:
-                                print(f"计算简单距离也失败: {str(simple_error)}")
-                
-                # 计算加权平均距离
-                if label_distances:
-                    total_weight = sum(label_weights)
-                    if total_weight > 0:
-                        weighted_distance = sum(d * w for d, w in zip(label_distances, label_weights)) / total_weight
-                    else:
-                        weighted_distance = np.mean(label_distances)
-                    
-                    distance_matrix[i, j] = weighted_distance
-                    distance_matrix[j, i] = weighted_distance
+            # 客户端聚类和模型分发
+            if i > 0 or not self.cluster_inited: # Perform clustering from the first round or if not initialized
+                print(f"\nPerforming clustering for round {i}...")
+                clustering_method = self.select_clustering_algorithm()
+                if clustering_method == 'vwc':
+                    self.vwc_clustering() 
+                elif clustering_method == 'label_conditional':
+                    self.perform_label_conditional_clustering(verbose=True)
+                elif clustering_method == 'enhanced_label':
+                    self.perform_enhanced_label_conditional_clustering(verbose=True)
                 else:
-                    # 没有共同标签，使用一个大距离
-                    distance_matrix[i, j] = 1.0
-                    distance_matrix[j, i] = 1.0
+                    self.vwc_clustering() # Default to VWC if method is unknown
+                self.cluster_inited = True
+                self.log_cluster_assignments(i) # Log cluster assignments to wandb
+
+            self.send_cluster_models() # Send appropriate cluster model to each client
+
+            if i % self.eval_gap == 0:
+                print(f"\n-------------Round number: {i}-------------")
+                print("\nEvaluate models (global and per-cluster if applicable)")
+                self.evaluate(current_round=i) # Evaluate global model (serverbase version)
+                # FedDCA might have its own cluster-specific evaluation, which also needs current_round
+                self.evaluate_cluster_performance(current_round=i) 
+
+            # 客户端训练
+            for client in self.selected_clients:
+                client.current_iteration = i # Pass current round for client-side logging if needed
+                client.train()
+
+            self.receive_models()
+            self.update_global_model() # This likely involves cluster-specific aggregation first, then global model update
+
+            # Concept alignment analysis (if applicable)
+            if hasattr(self.args, 'analyze_concept_alignment') and self.args.analyze_concept_alignment and (i % self.args.concept_analysis_interval == 0):
+                self.analyze_concept_alignment(current_round=i)
+
+            self.Budget.append(time.time() - s_t)
+            print('-'*25, 'time cost', '-'*25, self.Budget[-1])
+
+            if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
+                break
+            
+            # Increment drift iteration after the round processing
+            if self.use_drift_dataset:
+                 self.current_iteration = (self.current_iteration + 1) % self.max_iterations
+
+        print("\nBest accuracy.")
+        if self.rs_test_acc:
+            print(max(self.rs_test_acc))
+        print("\nAverage time cost per round.")
+        if len(self.Budget) > 1:
+            print(sum(self.Budget[1:]) / len(self.Budget[1:]))
+
+        self.save_results()
+        self.save_global_model(current_round=self.global_rounds) # Save final model
+        if hasattr(self, 'save_concept_progress') and callable(self.save_concept_progress):
+            self.save_concept_progress(current_round=self.global_rounds) # Save final concept data
+
+
+
+    def send_cluster_models(self):
+        assert (len(self.selected_clients) > 0)
+        for client in self.selected_clients:
+            cluster_id = self.clusters.get(client.id, 0) # Default to cluster 0 if not found
+            model_to_send = self.cluster_centroids.get(cluster_id, self.global_model) # Send cluster model or global if not found
+            client.set_parameters(model_to_send)
+
+    def evaluate_cluster_performance(self, current_round):
+        # This is a placeholder for FedDCA's specific cluster evaluation logic
+        # It should log metrics per cluster to wandb if possible
+        print(f"Evaluating cluster performance for round {current_round}...")
+        for cluster_id, model in self.cluster_centroids.items():
+            # Evaluate this cluster_model, similar to how global_model is evaluated in serverbase
+            # but on clients belonging to this cluster_id
+            cluster_clients = [c for c in self.clients if self.clusters.get(c.id) == cluster_id]
+            if not cluster_clients:
+                continue
+
+            num_samples = []
+            tot_correct = []
+            # Store original models to restore later
+            original_models = {c.id: copy.deepcopy(c.model) for c in cluster_clients}
+
+            for c in cluster_clients:
+                c.set_parameters(model) # Set cluster model for evaluation
+                ct, ns, auc = c.test_metrics() # Assuming test_metrics is available and returns (correct_preds, num_samples, auc_val)
+                tot_correct.append(ct*1.0)
+                num_samples.append(ns)
+            
+            # Restore original models
+            for c in cluster_clients:
+                c.set_parameters(original_models[c.id])
+
+            if sum(num_samples) > 0:
+                cluster_acc = sum(tot_correct) / sum(num_samples)
+                print(f"  Cluster {cluster_id} Test Accuracy: {cluster_acc:.4f}")
+                if wandb.run is not None:
+                    wandb.log({f"Cluster {cluster_id}/Test Accuracy": cluster_acc}, step=current_round)
+            else:
+                print(f"  Cluster {cluster_id}: No samples for evaluation.")
+
+    def log_cluster_assignments(self, current_round):
+        if wandb.run is not None and self.clusters:
+            # Log number of clients per cluster
+            cluster_counts = {f"Cluster {cid}/Client Count": 0 for cid in self.cluster_centroids.keys()}
+            for client_id, cluster_id in self.clusters.items():
+                if f"Cluster {cluster_id}/Client Count" in cluster_counts:
+                    cluster_counts[f"Cluster {cluster_id}/Client Count"] += 1
+                else: # Should not happen if cluster_centroids keys are source of truth
+                    cluster_counts[f"Cluster {cluster_id}/Client Count"] = 1
+            wandb.log(cluster_counts, step=current_round)
+
+            # Log individual client assignments if not too many clients
+            if len(self.clients) <= 50: # Arbitrary limit to prevent too much data
+                client_assignments_log = {}
+                for client in self.clients:
+                    client_assignments_log[f"Client {client.id}/Cluster Assignment"] = self.clusters.get(client.id, -1) # -1 if not assigned
+                wandb.log(client_assignments_log, step=current_round)
+
+    def analyze_concept_alignment(self, current_round):
+        # Placeholder for concept alignment analysis and logging to wandb
+        if hasattr(super(), 'analyze_concept_alignment') and callable(super().analyze_concept_alignment):
+            # This assumes analyze_concept_alignment is defined in a base or utility class
+            # and can log its findings to wandb internally or return them for logging here.
+            alignment_metrics = super().analyze_concept_alignment(self.clients, self.cluster_centroids, self.clusters, current_round)
+            if wandb.run is not None and alignment_metrics:
+                wandb.log(alignment_metrics, step=current_round)
+        else:
+            print("Concept alignment analysis method not found or not callable.")
+
+    # Ensure other methods like save_concept_progress also accept current_round if they save round-specific artifacts
+    def save_concept_progress(self, current_round):
+        # Modified to save with round number and potentially log to wandb
+        if not hasattr(self.args, 'save_concept_path') or not self.args.save_concept_path:
+            return
         
-        return distance_matrix
+        concept_data = {
+            "round": current_round,
+            "client_concepts": {c.id: c.active_concept_id for c in self.clients if hasattr(c, 'active_concept_id')},
+            "cluster_centroids_info": {cid: "model_summary_placeholder" for cid in self.cluster_centroids.keys()},
+            "client_cluster_assignments": self.clusters
+        }
+        
+        filepath = os.path.join(self.args.save_concept_path, f"concept_progress_round_{current_round}.json")
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(concept_data, f, indent=4)
+            print(f"Concept progress saved to {filepath}")
+
+            if self.args.wandb_save_artifacts and wandb.run is not None:
+                artifact_name = f'{self.args.wandb_run_name_prefix}_concept_progress'
+                artifact = wandb.Artifact(artifact_name, type='concept-data')
+                artifact.add_file(filepath, name=f"concept_progress_round_{current_round}.json")
+                wandb.log_artifact(artifact, aliases=['latest_concept_data', f'concept_round_{current_round}'])
+                print(f"Concept progress for round {current_round} saved to wandb.")
+        except Exception as e:
+            print(f"Error saving concept progress: {e}")

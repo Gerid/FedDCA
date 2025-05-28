@@ -4,6 +4,7 @@ import time
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+import wandb # Add wandb import
 
 from ..clients.clientbase import Client
 from utils.data_utils import read_client_data
@@ -52,7 +53,7 @@ class clientIFCA(Client):
         trainloader = self.load_train_data(batch_size=32)  # 使用较小的批量以加快计算速度
         
         # 计算每个模型在客户端数据上的损失
-        for model in global_models:
+        for model_idx, model in enumerate(global_models): # Added model_idx for logging
             model.eval()  # 设置为评估模式
             total_loss = 0
             sample_count = 0
@@ -70,17 +71,26 @@ class clientIFCA(Client):
                     total_loss += loss.item() * y.size(0)
                     sample_count += y.size(0)
                     
-                    # 限制每个模型评估的样本数量，以提高效率
-                    if sample_count >= 500:
-                        break
+ 
             
             # 计算平均损失
             avg_loss = total_loss / sample_count if sample_count > 0 else float('inf')
             loss_list.append(avg_loss)
+
+            # Log individual cluster model loss for this client
+            if wandb.run is not None:
+                wandb.log({f"Client_{self.id}/Loss_for_Cluster_Model_{model_idx}": avg_loss})
         
         # 选择损失最小的模型
         self.cluster_identity = int(np.argmin(loss_list))
         
+        # Log the chosen cluster and the full list of losses
+        if wandb.run is not None:
+            log_data = {f"Client_{self.id}/Chosen_Cluster": self.cluster_identity}
+            for idx, l in enumerate(loss_list):
+                log_data[f"Client_{self.id}/Loss_List_Cluster_{idx}"] = l
+            wandb.log(log_data)
+
         # 通知
         print(f"Client {self.id} selected cluster {self.cluster_identity} (losses: {[round(l, 4) for l in loss_list]})")
     
@@ -119,42 +129,9 @@ class clientIFCA(Client):
         self.train_time_cost['total_cost'] += time.time() - start_time
         
         # 更新学习率
-        if hasattr(self, 'learning_rate_scheduler'):
-            self.learning_rate_scheduler.step()
-    
-    def set_parameters(self, model):
-        """
-        设置模型参数
-        
-        Args:
-            model: 要设置的模型参数
-        """
-        for old_param, new_param in zip(self.model.parameters(), model):
-            old_param.data = new_param.data.clone()
-            
-    def test_metrics(self):
-        """
-        计算测试指标
-        
-        Returns:
-            测试准确率和测试样本数
-        """
-        testloader = self.load_test_data()
-        self.model.eval()
-        
-        test_acc = 0
-        test_num = 0
-        
-        with torch.no_grad():
-            for x, y in testloader:
-                if isinstance(x, list):
-                    x[0] = x[0].to(self.device)
-                else:
-                    x = x.to(self.device)
-                y = y.to(self.device)
-                
-                output = self.model(x)
-                test_acc += (torch.sum(torch.argmax(output, dim=1) == y)).item()
-                test_num += y.shape[0]
-                
-        return test_acc, test_num
+        if self.args.learning_rate_decay:  # 仅当 learning_rate_decay 标志为 True 时才执行 step
+            if hasattr(self, 'learning_rate_scheduler'):
+                self.learning_rate_scheduler.step()
+
+
+
