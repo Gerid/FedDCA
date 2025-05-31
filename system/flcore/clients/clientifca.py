@@ -77,19 +77,16 @@ class clientIFCA(Client):
             avg_loss = total_loss / sample_count if sample_count > 0 else float('inf')
             loss_list.append(avg_loss)
 
-            # Log individual cluster model loss for this client
-            if wandb.run is not None:
-                wandb.log({f"Client_{self.id}/Loss_for_Cluster_Model_{model_idx}": avg_loss})
         
         # 选择损失最小的模型
         self.cluster_identity = int(np.argmin(loss_list))
         
         # Log the chosen cluster and the full list of losses
-        if wandb.run is not None:
-            log_data = {f"Client_{self.id}/Chosen_Cluster": self.cluster_identity}
-            for idx, l in enumerate(loss_list):
-                log_data[f"Client_{self.id}/Loss_List_Cluster_{idx}"] = l
-            wandb.log(log_data)
+        # if wandb.run is not None:
+        #     log_data = {f"Client_{self.id}/Chosen_Cluster": self.cluster_identity}
+        #     for idx, l in enumerate(loss_list):
+        #         log_data[f"Client_{self.id}/Loss_List_Cluster_{idx}"] = l
+        #     wandb.log(log_data)
 
         # 通知
         print(f"Client {self.id} selected cluster {self.cluster_identity} (losses: {[round(l, 4) for l in loss_list]})")

@@ -612,8 +612,8 @@ class FedCCFA(Server):
                 
                 client_timings.append(time.time() - client_start_time)
 
-            if self.args.use_wandb:
-                wandb.log({"Client Training Time (avg)": np.mean(client_timings) if client_timings else 0}, step=i)
+            # if self.args.use_wandb:
+            #     wandb.log({"Client Training Time (avg)": np.mean(client_timings) if client_timings else 0}, step=i)
 
             # Server-side aggregations and updates
             server_aggregation_start_time = time.time()

@@ -89,6 +89,7 @@ def run(args):
                 run_name += "_drift"
             
             wandb_config = vars(args).copy()
+            wandb.login(key=args.wandb_api_key)  # Ensure API key is set before initializing
             # Remove sensitive or non-serializable args if necessary
             if 'wandb_api_key' in wandb_config:
                 del wandb_config['wandb_api_key']

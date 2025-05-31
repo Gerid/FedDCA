@@ -337,7 +337,7 @@ class Server(object):
                     "Global Test AUC": test_auc,
                     "Std Test Accuracy": std_test_acc,
                     "Std Test AUC": std_test_auc
-                }, step=self.current_round if self.current_round is not None else None)
+                }, step=self.current_round)
             except Exception as e:
                 print(f"Error logging metrics to wandb: {e}")
 

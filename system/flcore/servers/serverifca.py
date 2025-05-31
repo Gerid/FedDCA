@@ -354,13 +354,13 @@ class FedIFCA(Server):
             if len(self.rs_test_acc) <= self.global_rounds // self.eval_gap:
                 self.rs_test_acc.append(best_acc)  # 使用最佳集群的准确率
                 if wandb.run is not None and current_round is not None:
-                    wandb.log({"Overall Best Cluster Accuracy": best_acc, "Overall Weighted Avg Accuracy": weighted_avg_acc}, step=current_round)
+                    wandb.log({"Overall Best Cluster Accuracy": best_acc, "Overall Weighted Avg Accuracy": weighted_avg_acc}, step=self.current_round)
             else:
                 # 更新为所有集群的最大值
                 self.rs_test_acc[-1] = max(self.rs_test_acc[-1], best_acc)
                 # Log updated best accuracy if it changed
                 if wandb.run is not None and current_round is not None:
-                     wandb.log({"Overall Best Cluster Accuracy": self.rs_test_acc[-1], "Overall Weighted Avg Accuracy": weighted_avg_acc}, step=current_round)
+                     wandb.log({"Overall Best Cluster Accuracy": self.rs_test_acc[-1], "Overall Weighted Avg Accuracy": weighted_avg_acc}, step=self.current_round)
 
     def print_cluster_distribution(self, current_round=None): # Add current_round
         """打印每个集群的客户端分布情况"""
@@ -378,8 +378,8 @@ class FedIFCA(Server):
             if len(client_list) > 10:
                 client_list = client_list[:5] + ["..."] + client_list[-5:]
             print(f"集群 {cluster_id}: {stats['count']} 个客户端 {client_list}")
-            if wandb.run is not None and current_round is not None:
-                 wandb.log({f"Cluster {cluster_id}/Client Count": stats['count']}, step=current_round)
+            if wandb.run is not None and self.current_round is not None:
+                 wandb.log({f"Cluster {cluster_id}/Client Count": stats['count']}, step=self.current_round)
 
     def visualize_clustering(self, round_idx):
         """可视化当前的集群分配"""
@@ -447,7 +447,7 @@ class FedIFCA(Server):
                 plt.close()
                 
                 print(f"集群可视化已保存到 {vis_dir}/clustering_round_{round_idx}.png")
-                if self.args.wandb_save_artifacts and wandb.run is not None:
+                if self.args.save_global_model_to_wandb and wandb.run is not None:
                     try:
                         vis_artifact = wandb.Artifact(
                             f'{self.args.wandb_run_name_prefix}_cluster_visualization',
@@ -483,7 +483,7 @@ class FedIFCA(Server):
                 json.dump(history_data, f, indent=4)
                 
             print(f"集群历史记录已保存到 {filepath}")
-            if self.args.wandb_save_artifacts and wandb.run is not None:
+            if self.args.save_global_model_to_wandb and wandb.run is not None:
                 try:
                     hist_artifact = wandb.Artifact(
                         f'{self.args.wandb_run_name_prefix}_cluster_history',
@@ -521,7 +521,7 @@ class FedIFCA(Server):
         torch.save(model_to_save, model_filepath)
         print(f"Cluster {cluster_id} model saved to {model_filepath}")
 
-        if self.args.wandb_save_model and wandb.run is not None and current_round is not None:
+        if self.args.save_global_model_to_wandb and wandb.run is not None and current_round is not None:
             try:
                 artifact_name = f'{self.args.wandb_run_name_prefix}_cluster_{cluster_id}_model'
                 model_artifact = wandb.Artifact(

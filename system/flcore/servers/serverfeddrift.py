@@ -120,8 +120,8 @@ class FedDrift(Server):
         # 输出耗时统计
         avg_time = sum(self.Budget) / len(self.Budget) if len(self.Budget) > 0 else 0
         print(f"平均每轮耗时: {avg_time:.2f}秒")
-        if self.args.wandb:
-            wandb.log({"FedDrift/Average Round Time": avg_time})
+        # if self.args.wandb:
+        #     wandb.log({"FedDrift/Average Round Time": avg_time})
             
         # 保存结果和模型
         self.save_results() # Uses serverbase save_results, which handles wandb artifact for h5
@@ -458,7 +458,7 @@ class FedDrift(Server):
                 "FedDrift/Average Train Loss": stats['loss'],
                 "FedDrift/Cluster Count": len(self.global_models),
                 "round": current_round
-            })
+            }, step=current_round)
         return stats
 
     def save_models(self, current_round=None): # Added current_round
