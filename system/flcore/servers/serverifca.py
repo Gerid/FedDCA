@@ -46,6 +46,15 @@ class FedIFCA(Server):
             
             print("\\n客户端计算集群身份...") # Applies to all rounds now
             for client in self.selected_clients:
+                if i == 100:  # Condition for drift
+                    if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
+                        if hasattr(client, 'apply_drift_transformation'):
+                            print(f"Server: Applying drift for client {client.id} at round {i}")
+                            # Apply drift to both training and testing datasets on the client
+                            client.apply_drift_transformation()
+                        else:
+                            print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
+
                 try:
                     # Store old cluster ID for logging changes, if client was seen before
                     old_cluster_id = self.client_cluster_identity.get(client.id, -1) # Default to -1 if new client

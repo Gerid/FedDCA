@@ -570,6 +570,19 @@ class FedCCFA(Server):
             balanced_clf_params_from_clients = {} # To store clf params after balanced_train or train_with_protos
 
             for client in selected_clients:
+                # Apply concept drift at specific round (e.g., round 100)
+                if i == 100: # Condition for drift
+                    if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
+                        if hasattr(client, 'apply_drift_transformation'):
+                            print(f"Server: Applying drift for client {client.id} at round {i}")
+                            # Apply drift to both training and testing datasets on the client
+                            client.apply_drift_transformation()
+                        else:
+                            print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
+                    # else:
+                        # print(f"Client {client.id} not configured for drift or use_drift_dataset is False at round {i}")
+
+
                 client_start_time = time.time()
 
                 # 1. Client updates its label distribution
@@ -647,7 +660,7 @@ class FedCCFA(Server):
                 for group_of_client_ids in client_id_groups_for_label:
                     if not group_of_client_ids: # Empty group
                         continue
-                    
+                        
                     # Map client IDs to client objects
                     clients_in_current_group = [client for client in selected_clients if client.id in group_of_client_ids]
                     if not clients_in_current_group:

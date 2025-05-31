@@ -403,97 +403,97 @@ class clientDCA(Client):
         # 可以根据需要添加其他重置逻辑
         # 例如重置优化器状态等
 
-    def load_train_data(self, batch_size=None):
-        """重写加载训练数据方法，以支持标准CIFAR-100上的模拟漂移
+    # def load_train_data(self, batch_size=None):
+    #     """重写加载训练数据方法，以支持标准CIFAR-100上的模拟漂移
         
-        根据当前迭代次数和预设的漂移模式修改数据标签和分布
-        """
-        if batch_size is None:
-            batch_size = self.batch_size
+    #     根据当前迭代次数和预设的漂移模式修改数据标签和分布
+    #     """
+    #     if batch_size is None:
+    #         batch_size = self.batch_size
         
-        # 首先获取原始训练数据
-        train_data = read_client_data(self.dataset, self.id, is_train=True)
+    #     # 首先获取原始训练数据
+    #     train_data = read_client_data(self.dataset, self.id, is_train=True)
         
-        # 如果启用了标准数据集上的模拟漂移
-        if hasattr(self, 'simulate_drift') and self.simulate_drift:
-            # 应用漂移转simulate_drift换
-            train_data = self.apply_drift_transformation(train_data)
+    #     # 如果启用了标准数据集上的模拟漂移
+    #     if hasattr(self, 'simulate_drift') and self.simulate_drift:
+    #         # 应用漂移转simulate_drift换
+    #         train_data = self.apply_drift_transformation(train_data)
             
-            # 每次调用此方法时递增迭代计数
-            if hasattr(self, 'increment_iteration') and self.increment_iteration:
-                self.current_iteration = min(self.current_iteration + 1, self.max_iterations - 1)
+    #         # 每次调用此方法时递增迭代计数
+    #         if hasattr(self, 'increment_iteration') and self.increment_iteration:
+    #             self.current_iteration = min(self.current_iteration + 1, self.max_iterations - 1)
                 
-        return DataLoader(train_data, batch_size, drop_last=True, shuffle=True)
+    #     return DataLoader(train_data, batch_size, drop_last=True, shuffle=True)
 
-    def load_test_data(self, batch_size=None):
-        """重写加载训练数据方法，以支持标准CIFAR-100上的模拟漂移
+    # def load_test_data(self, batch_size=None):
+    #     """重写加载训练数据方法，以支持标准CIFAR-100上的模拟漂移
         
-        根据当前迭代次数和预设的漂移模式修改数据标签和分布
-        """
-        if batch_size is None:
-            batch_size = self.batch_size
+    #     根据当前迭代次数和预设的漂移模式修改数据标签和分布
+    #     """
+    #     if batch_size is None:
+    #         batch_size = self.batch_size
 
-        # 首先获取原始训练数据
-        test_data = read_client_data(self.dataset, self.id, is_train=False)
+    #     # 首先获取原始训练数据
+    #     test_data = read_client_data(self.dataset, self.id, is_train=False)
 
-        # 如果启用了标准数据集上的模拟漂移
-        if hasattr(self, 'simulate_drift') and self.simulate_drift:
-            # 应用漂移转simulate_drift换
-            test_data = self.apply_drift_transformation(test_data)
+    #     # 如果启用了标准数据集上的模拟漂移
+    #     if hasattr(self, 'simulate_drift') and self.simulate_drift:
+    #         # 应用漂移转simulate_drift换
+    #         test_data = self.apply_drift_transformation(test_data)
 
-            # 每次调用此方法时递增迭代计数
-            if hasattr(self, 'increment_iteration') and self.increment_iteration:
-                self.current_iteration = min(
-                    self.current_iteration + 1, self.max_iterations - 1)
+    #         # 每次调用此方法时递增迭代计数
+    #         if hasattr(self, 'increment_iteration') and self.increment_iteration:
+    #             self.current_iteration = min(
+    #                 self.current_iteration + 1, self.max_iterations - 1)
 
-        return DataLoader(test_data, batch_size, drop_last=True, shuffle=True)
+    #     return DataLoader(test_data, batch_size, drop_last=True, shuffle=True)
 
-    def apply_drift_transformation(self, dataset):
-        """根据当前迭代和预设模式对数据集应用概念漂移变换
+    # def apply_drift_transformation(self, dataset):
+    #     """根据当前迭代和预设模式对数据集应用概念漂移变换
         
-        实现了三种主要的概念漂移类型：
-        1. 突变漂移(sudden drift)：在漂移点立即切换到新概念
-        2. 渐进漂移(gradual drift)：在漂移点周围窗口期内，逐渐从一个概念过渡到另一个
-        3. 周期漂移(recurring drift)：按照周期在可用概念间循环切换
+    #     实现了三种主要的概念漂移类型：
+    #     1. 突变漂移(sudden drift)：在漂移点立即切换到新概念
+    #     2. 渐进漂移(gradual drift)：在漂移点周围窗口期内，逐渐从一个概念过渡到另一个
+    #     3. 周期漂移(recurring drift)：按照周期在可用概念间循环切换
         
-        Args:
-            dataset: 原始数据集
+    #     Args:
+    #         dataset: 原始数据集
             
-        Returns:
-            transformed_dataset: 应用了漂移变换的数据集
-        """
+    #     Returns:
+    #         transformed_dataset: 应用了漂移变换的数据集
+    #     """
         
-        # 如果尚未初始化漂移参数，则初始化
-        if not hasattr(self, 'drift_patterns') or self.drift_patterns is None:
-            self.initialize_drift_patterns()
+    #     # 如果尚未初始化漂移参数，则初始化
+    #     if not hasattr(self, 'drift_patterns') or self.drift_patterns is None:
+    #         self.initialize_drift_patterns()
             
 
 
-        current_concept = self.get_current_concept()
+    #     current_concept = self.get_current_concept()
         
-        if current_concept is None:
-            return dataset  # 如果没有漂移模式，返回原始数据集
+    #     if current_concept is None:
+    #         return dataset  # 如果没有漂移模式，返回原始数据集
             
-        # 从数据集提取数据和标签
-        all_data = []
-        all_labels = []
-        for img, label in dataset:
-            all_data.append(img)
-            all_labels.append(label)
+    #     # 从数据集提取数据和标签
+    #     all_data = []
+    #     all_labels = []
+    #     for img, label in dataset:
+    #         all_data.append(img)
+    #         all_labels.append(label)
             
-        if len(all_data) == 0:
-            return dataset  # 空数据集，直接返回
+    #     if len(all_data) == 0:
+    #         return dataset  # 空数据集，直接返回
             
-        all_data = torch.stack(all_data)
-        all_labels = torch.tensor(all_labels)
+    #     all_data = torch.stack(all_data)
+    #     all_labels = torch.tensor(all_labels)
         
-        # 应用基于概念的类别偏好调整
-        if current_concept is not None:
-            all_data, all_labels = self.apply_concept_distribution(all_data, all_labels, current_concept)
+    #     # 应用基于概念的类别偏好调整
+    #     if current_concept is not None:
+    #         all_data, all_labels = self.apply_concept_distribution(all_data, all_labels, current_concept)
         
                 
-        # 返回转换后的数据集
-        return TensorDataset(all_data, all_labels)
+    #     # 返回转换后的数据集
+    #     return TensorDataset(all_data, all_labels)
     
     def apply_concept_distribution(self, data, labels, concept):
         """根据当前概念调整类别分布和标签

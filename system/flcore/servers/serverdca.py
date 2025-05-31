@@ -107,29 +107,29 @@ class FedDCA(Server):
         self.use_drift_dataset = args.use_drift_dataset if hasattr(args, 'use_drift_dataset') else False
         self.drift_data_dir = args.drift_data_dir if hasattr(args, 'drift_data_dir') else "system/Cifar100_clustered/"
 
-        # 添加命令行参数支持
-        if hasattr(args, 'cmd_args') and args.cmd_args:
-            # 如果命令行中指定了这些参数，则覆盖默认值
-            if hasattr(args.cmd_args, 'use_drift_dataset'):
-                self.use_drift_dataset = args.cmd_args.use_drift_dataset
-            if hasattr(args.cmd_args, 'drift_data_dir'):
-                self.drift_data_dir = args.cmd_args.drift_data_dir
-            if hasattr(args.cmd_args, 'max_iterations'):
-                self.max_iterations = args.cmd_args.max_iterations
+        # # 添加命令行参数支持
+        # if hasattr(args, 'cmd_args') and args.cmd_args:
+        #     # 如果命令行中指定了这些参数，则覆盖默认值
+        #     if hasattr(args.cmd_args, 'use_drift_dataset'):
+        #         self.use_drift_dataset = args.cmd_args.use_drift_dataset
+        #     if hasattr(args.cmd_args, 'drift_data_dir'):
+        #         self.drift_data_dir = args.cmd_args.drift_data_dir
+        #     if hasattr(args.cmd_args, 'max_iterations'):
+        #         self.max_iterations = args.cmd_args.max_iterations
         
         # 初始化服务器端共享的概念漂移模拟
-        self.initialize_shared_concepts()
+        # self.initialize_shared_concepts()
                 
         # 如果启用了概念漂移数据集，加载漂移配置
-        if self.use_drift_dataset and self.drift_data_dir:
-            self.load_drift_config()
+        # if self.use_drift_dataset and self.drift_data_dir:
+        #     self.load_drift_config()
 
         # 初始化 VWC 聚类器
         self.vwc = VariationalWassersteinClustering(
             num_clients=args.num_clients,
             num_clusters=args.num_clusters,
-            proxy_dim=args.proxy_dim,
-            sinkhorn_reg=args.sinkhorn_reg
+            proxy_dim=32,
+            sinkhorn_reg= 0.01
         )
 
         self.Budget = []  # 用于记录每轮训练的时间成本
@@ -816,15 +816,15 @@ class FedDCA(Server):
             self.current_round = i # Keep track of current round
 
             # 概念漂移处理 (如果启用)
-            if self.use_drift_dataset:
-                print(f"\nUpdating client iteration to {self.current_iteration} for round {i}")
-                for client in self.clients: # Update for all clients, or selected_clients if selection happens before this
-                    client.update_iteration(self.current_iteration)
-                if self.current_iteration in self.drift_iterations:
-                    print(f"\n⚠️ Concept drift occurring at iteration {self.current_iteration} (Round {i})")
-                    # Potentially log drift event to wandb
-                    if wandb.run is not None:
-                        wandb.log({"Concept Drift Event": 1, "Drift Iteration": self.current_iteration}, step=i)
+            # if self.use_drift_dataset:
+            #     print(f"\nUpdating client iteration to {self.current_iteration} for round {i}")
+            #     for client in self.clients: # Update for all clients, or selected_clients if selection happens before this
+            #         client.update_iteration(self.current_iteration)
+            #     if self.current_iteration in self.drift_iterations:
+            #         print(f"\n⚠️ Concept drift occurring at iteration {self.current_iteration} (Round {i})")
+            #         # Potentially log drift event to wandb
+            #         if wandb.run is not None:
+            #             wandb.log({"Concept Drift Event": 1, "Drift Iteration": self.current_iteration}, step=i)
 
             self.selected_clients = self.select_clients()
             
@@ -854,7 +854,20 @@ class FedDCA(Server):
 
             # 客户端训练
             for client in self.selected_clients:
+                # Apply concept drift at specific round (e.g., round 100)
+                if i == 0: # Condition for drift
+                    if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
+                        if hasattr(client, 'apply_drift_transformation'):
+                            print(f"Server: Applying drift for client {client.id} at round {i}")
+                            # Apply drift to both training and testing datasets on the client
+                            client.apply_drift_transformation()
+                        else:
+                            print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
+                    # else:
+                        # print(f"Client {client.id} not configured for drift or use_drift_dataset is False at round {i}")
+
                 client.current_iteration = i # Pass current round for client-side logging if needed
+
                 client.train()
 
             self.receive_models()
@@ -870,10 +883,6 @@ class FedDCA(Server):
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
                 break
             
-            # Increment drift iteration after the round processing
-            if self.use_drift_dataset:
-                 self.current_iteration = (self.current_iteration + 1) % self.max_iterations
-
         print("\nBest accuracy.")
         if self.rs_test_acc:
             print(max(self.rs_test_acc))

@@ -1,12 +1,14 @@
 {
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
             "program": "${file}",
             "cwd": "${cwd}/system",
+            // "cwd": "${cwd}/dataset",
             "console": "integratedTerminal",
             "justMyCode": true,
             /* "args": [
@@ -27,7 +29,7 @@
                 "-m",
                 "cnn",
                 "-algo",
-                "FedCCFA",
+                "FedIFCA",
                 "-gr",
                 "200",
                 "-lbs",
@@ -44,12 +46,13 @@
                 "20",
                 "--clustering_method",
                 "label_conditional",
-                "--use_wandb",
-                "--save_global_model_to_wandb",
-                "--save_results_to_wandb",
-                "--simulate_drift", //Simulate data drift
-                // "--use_drift_dataset"  //Use a separate drift dataset
+                // "--use_wandb",
+                // "--save_global_model_to_wandb",
+                // "--save_results_to_wandb",
+                // "--simulate_drift", //Simulate data drift
+                "--use_drift_dataset"  //Use a separate drift dataset
             ]
-        }
+        },
+
     ]
 }
