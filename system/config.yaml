@@ -1,0 +1,59 @@
+common:
+  dataset: Cifar100
+  model: cnn # Placeholder, should be converted to a model object in main.py
+  num_classes: 100
+  num_clients: 100
+  join_ratio: 0.1
+  global_rounds: 200
+  local_epochs: 5
+  batch_size: 64
+  local_learning_rate: 0.01
+  device: cuda
+  eval_gap: 10
+  save_folder_name: "experiment_results" # Relative to where main.py is run or an absolute path
+  use_wandb: True
+  goal_accuracy: 0.95
+  auto_break: False
+  learning_rate_decay: False # Example, adjust as needed
+  learning_rate_decay_gamma: 0.99 # Example
+  privacy: False # Example for clientbase
+  dp_sigma: 1.0 # Example for clientbase
+  weight_decay: 1e-4 # Example for optimizers
+  momentum: 0.9 # Example for optimizers
+
+
+fedavg:
+  # No specific params for FedAvg in this example, inherits all from common
+
+adaptivefedavg:
+  beta1: 0.9
+  beta2: 0.99
+  beta3: 0.9
+  # local_learning_rate: 0.01 # Can be inherited or overridden
+
+fedifca:
+  cluster_num: 3
+  visualize_clusters: False # Example: whether to visualize clusters during training
+
+fedccfa:
+  eps: 0.5
+  clustered_protos: True
+  oracle: False
+  weights: "label" 
+  gamma: 0.1
+  lambda_proto: 1.0
+  # clf_keys: ["fc.weight", "fc.bias"] # Example, might be determined dynamically
+
+feddrift:
+  detection_threshold: 0.15
+  drift_data_dir: "dataset/Cifar100_clustered" # Example path, ensure it exists or is created
+  use_drift_dataset: True
+  max_iterations: 200 
+  simulate_drift: True
+  visualize_clusters: True # Example for FedDrift
+
+fedrc:
+  num_clusters: 3
+  cluster_update_frequency: 5
+  fedrc_lambda: 0.1
+

@@ -46,7 +46,7 @@ class FedDrift(Server):
             
             # 每个客户端进行集群分配
             for client in self.selected_clients:
-                if i == 10:  # Condition for drift
+                if i == 100:  # Condition for drift
                     if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
                         if hasattr(client, 'apply_drift_transformation'):
                             print(f"Server: Applying drift for client {client.id} at round {i}")

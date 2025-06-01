@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 import torchvision
 import logging
+import yaml # Added YAML import
 
 import wandb # Added for Weights & Biases
 
@@ -48,6 +49,7 @@ from flcore.servers.serverifca import FedIFCA
 from flcore.servers.serverfedccfa import FedCCFA
 from flcore.servers.serverfeddrift import FedDrift
 from flcore.servers.serverflash import Flash
+from flcore.servers.serverfedrc import serverFedRC # Add FedRC server import
 
 from flcore.trainmodel.models import *
 
@@ -412,6 +414,17 @@ def run(args):
                 args.server_learning_rate = 1.0  # 服务器学习率
                 
             server = Flash(args, i)
+
+        elif args.algorithm == "FedRC": # Add FedRC algorithm block
+            # FedRC specific parameters will be loaded from YAML or command line
+            # Ensure num_clusters, cluster_update_frequency, fedrc_lambda are in args
+            if not hasattr(args, 'num_clusters'): # Default if not in YAML/CLI
+                args.num_clusters = 3 
+            if not hasattr(args, 'cluster_update_frequency'):
+                args.cluster_update_frequency = 5
+            if not hasattr(args, 'fedrc_lambda'):
+                args.fedrc_lambda = 0.1
+            server = serverFedRC(args, i)
             
         else:
             raise NotImplementedError
@@ -443,6 +456,9 @@ if __name__ == "__main__":
     total_start = time.time()
 
     parser = argparse.ArgumentParser()
+    # Add an argument for the config file
+    parser.add_argument('-cfg', "--config_file", type=str, default="../config.yaml", 
+                        help="Path to the YAML configuration file")
     # general
     parser.add_argument('-go', "--goal", type=str, default="test", 
                         help="The goal for this experiment")
@@ -622,66 +638,78 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
+    # Load YAML config
+    config_path = args.config_file
+    if not os.path.isabs(config_path):
+        # Assuming main.py is in system/ and config.yaml is in the root PFL-Non-IID/
+        # Adjust if your structure is different or if you run main.py from the root.
+        # If main.py is run from d:\repos\PFL-Non-IID\system\, then ../config.yaml is correct.
+        # If main.py is run from d:\repos\PFL-Non-IID\, then config.yaml would be correct.
+        # For now, let's assume it's relative to the script's directory's parent.
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        config_path = os.path.join(os.path.dirname(script_dir), args.config_file) 
+        # This makes it robust to where you run python from, assuming config is in root
+        # If config.yaml is in the same directory as main.py, use:
+        # config_path = os.path.join(script_dir, args.config_file)
 
+    try:
+        with open(config_path, 'r') as f:
+            yaml_config = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"Warning: YAML config file not found at {config_path}. Using default argparse values.")
+        yaml_config = {}
+    except Exception as e:
+        print(f"Error loading YAML config file: {e}. Using default argparse values.")
+        yaml_config = {}
+
+    # Merge YAML config with argparse defaults
+    # Argparse values take precedence if provided explicitly on the command line
+    # For common parameters, load from YAML first, then let argparse override if specified
+    
+    # Create a new namespace or update args directly.
+    # We will update args, letting command-line args override YAML.
+    
+    # Load common config
+    common_config = yaml_config.get('common', {})
+    for key, value in common_config.items():
+        if not hasattr(args, key) or getattr(args, key) == parser.get_default(key):
+            setattr(args, key, value)
+
+    # Load algorithm-specific config
+    # The args.algorithm is from argparse (command line or its default)
+    algo_config = yaml_config.get(args.algorithm.lower(), {})
+    for key, value in algo_config.items():
+        if not hasattr(args, key) or getattr(args, key) == parser.get_default(key):
+            setattr(args, key, value)
+
+    # Override with command-line arguments if they were changed from their defaults
+    # This is implicitly handled because argparse already parsed them into args.
+    # If a command-line arg was given, it's already in 'args' and won't be overwritten by YAML
+    # unless the YAML loading logic above is changed to always prefer YAML.
+    # The current logic: YAML sets if argparse is default. If argparse is not default, it stays.
+
+    # wandb specific args from YAML (if not overridden by command line)
+    wandb_yaml_config = yaml_config.get('wandb', {})
+    for key, value in wandb_yaml_config.items():
+        if not hasattr(args, key) or getattr(args, key) == parser.get_default(key):
+            setattr(args, key, value)
+
+
+    # Ensure device is set correctly
     if args.device == "cuda" and not torch.cuda.is_available():
-        print("\ncuda is not avaiable.\n")
+        print("CUDA not available, switching to CPU.")
         args.device = "cpu"
+    elif args.device == "cuda":
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
+        print(f"Using CUDA device: {args.device_id}")
+    else:
+        print("Using CPU.")
 
-    print("=" * 50)
+    print("Hyperparameters:")
+    for k, v in vars(args).items():
+        print(f"{k}: {v}")
 
-    print("Algorithm: {}".format(args.algorithm))
-    print("Local batch size: {}".format(args.batch_size))
-    print("Local steps: {}".format(args.local_epochs))
-    print("Local learing rate: {}".format(args.local_learning_rate))
-    print("Local learing rate decay: {}".format(args.learning_rate_decay))
-    if args.learning_rate_decay:
-        print("Local learing rate decay gamma: {}".format(args.learning_rate_decay_gamma))
-    print("Total number of clients: {}".format(args.num_clients))
-    print("Clients join in each round: {}".format(args.join_ratio))
-    print("Clients randomly join: {}".format(args.random_join_ratio))
-    print("Client drop rate: {}".format(args.client_drop_rate))
-    print("Client select regarding time: {}".format(args.time_select))
-    if args.time_select:
-        print("Time threthold: {}".format(args.time_threthold))
-    print("Running times: {}".format(args.times))
-    print("Dataset: {}".format(args.dataset))
-    print("Number of classes: {}".format(args.num_classes))
-    print("Backbone: {}".format(args.model))
-    print("Using device: {}".format(args.device))
-    print("Using DP: {}".format(args.privacy))
-    if args.privacy:
-        print("Sigma for DP: {}".format(args.dp_sigma))
-    print("Auto break: {}".format(args.auto_break))
-    if not args.auto_break:
-        print("Global rounds: {}".format(args.global_rounds))
-    if args.device == "cuda":
-        print("Cuda device id: {}".format(os.environ["CUDA_VISIBLE_DEVICES"]))
-    print("DLG attack: {}".format(args.dlg_eval))
-    if args.dlg_eval:
-        print("DLG attack round gap: {}".format(args.dlg_gap))
-    print("Total number of new clients: {}".format(args.num_new_clients))
-    print("Fine tuning epoches on new clients: {}".format(args.fine_tuning_epoch))
-    print("=" * 50)
-
-
-    # if args.dataset == "mnist" or args.dataset == "fmnist":
-    #     generate_mnist('../dataset/mnist/', args.num_clients, 10, args.niid)
-    # elif args.dataset == "Cifar10" or args.dataset == "Cifar100":
-    #     generate_cifar10('../dataset/Cifar10/', args.num_clients, 10, args.niid)
-    # else:
-    #     generate_synthetic('../dataset/synthetic/', args.num_clients, 10, args.niid)
-
-    # with torch.profiler.profile(
-    #     activities=[
-    #         torch.profiler.ProfilerActivity.CPU,
-    #         torch.profiler.ProfilerActivity.CUDA],
-    #     profile_memory=True, 
-    #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log')
-    #     ) as prof:
-    # with torch.autograd.profiler.profile(profile_memory=True) as prof:
     run(args)
 
-    
-    # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
-    # print(f"\nTotal time cost: {round(time.time()-total_start, 2)}s.")
+
+    print(f"\nTotal time cost: {round(time.time()-total_start, 2)}s.")
