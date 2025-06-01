@@ -29,11 +29,11 @@
                 "-m",
                 "cnn",
                 "-algo",
-                "FedIFCA",
+                "FedDrift",
                 "-gr",
-                "200",
+                "20",
                 "-lbs",
-                "4",
+                "64",
                 "-did",
                 "0",
                 "-go",
@@ -47,8 +47,8 @@
                 "--clustering_method",
                 "label_conditional",
                 "--use_wandb",
-                // "--save_global_model_to_wandb",
-                // "--save_results_to_wandb",
+                "--save_global_model_to_wandb",
+                "--save_results_to_wandb",
                 // "--simulate_drift", //Simulate data drift
                 "--use_drift_dataset"  //Use a separate drift dataset
             ]

@@ -21,20 +21,12 @@ class FedAvg(Server):
 
     def train(self):
         for i in range(self.global_rounds+1):
+            self.current_round = i 
             s_t = time.time()
 
             self.selected_clients = self.select_clients()
             self.send_models()
-
-            if i == 100:  # Condition for drift
-                if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
-                    if hasattr(client, 'apply_drift_transformation'):
-                        print(f"Server: Applying drift for client {client.id} at round {i}")
-                        # Apply drift to both training and testing datasets on the client
-                        client.apply_drift_transformation()
-                    else:
-                        print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
-
+            self.apply_drift_transformation()
 
             if i%self.eval_gap == 0:
                 print(f"\n-------------Round number: {i}-------------")

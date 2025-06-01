@@ -393,9 +393,9 @@ def run(args):
         elif args.algorithm == "FedDrift":
             # 为FedDrift设置特定参数
             if not hasattr(args, 'detection_threshold'):
-                args.detection_threshold = 0.1  # 概念漂移检测阈值
+                args.detection_threshold = 0.5  # 概念漂移检测阈值
             if not hasattr(args, 'visualize_clusters'):
-                args.visualize_clusters = True  # 是否可视化集群
+                args.visualize_clusters = False  # 是否可视化集群
                 
             server = FedDrift(args, i)
         elif args.algorithm == "Flash":

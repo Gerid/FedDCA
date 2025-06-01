@@ -46,6 +46,15 @@ class FedDrift(Server):
             
             # 每个客户端进行集群分配
             for client in self.selected_clients:
+                if i == 10:  # Condition for drift
+                    if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
+                        if hasattr(client, 'apply_drift_transformation'):
+                            print(f"Server: Applying drift for client {client.id} at round {i}")
+                            # Apply drift to both training and testing datasets on the client
+                            client.apply_drift_transformation()
+                        else:
+                            print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
+
                 client.clustering(self.global_models)
             
             # 如果有多于一个集群，尝试合并相似的集群
@@ -65,8 +74,8 @@ class FedDrift(Server):
             unique_clusters = len(set(cluster_identities)) if cluster_identities else 0
             self.cluster_counts.append(unique_clusters)
             print(f"当前轮次 {i} 的集群数量: {unique_clusters}")
-            if self.args.wandb:
-                wandb.log({"FedDrift/Unique Clusters": unique_clusters, "round": i})
+            if  self.args.use_wandb:
+                wandb.log({"FedDrift/Unique Clusters": unique_clusters, "round": i}, step=i)
             
             # 发送参数给客户端
             self.send_models(self.selected_clients)
@@ -187,7 +196,7 @@ class FedDrift(Server):
 
 
             for client in client_groups[identity]:
-                client_size = len(client.train_loader.dataset) if client.train_loader else 0 # Use train_loader.dataset
+                client_size = len(client.train_data) if client.train_data else 0 # Use train_loader.dataset
                 if client_size == 0: # Skip clients with no training data for aggregation
                     continue
                 total_size += client_size
@@ -202,7 +211,7 @@ class FedDrift(Server):
 
     def merge_clusters(self, clients):
         """
-        合并相似的集群
+        合并相似的集群。参考 FedDrift.py 的实现。
         
         Args:
             clients: 客户端列表
@@ -210,170 +219,181 @@ class FedDrift(Server):
         global_model_num = len(self.global_models)
         if global_model_num <= 1:
             return
-        
+
         # 初始化损失矩阵
-        loss_matrix = np.full((global_model_num, global_model_num), -1.0) # Initialize with -1
+        # loss_matrix[i][j] 表示集群 j 中的客户端数据在全局模型 i 上的平均损失
+        loss_matrix = np.full((global_model_num, global_model_num), -1.0)
         
         # 生成损失矩阵用于计算集群距离
         for i in range(global_model_num):
             for j in range(global_model_num):
-                total_data_size = 0
-                total_loss = 0.0
+                total_data_size_in_cluster_j = 0
+                total_loss_model_i_on_cluster_j = 0.0
                 
-                # 计算集群j中客户端数据在模型i上的损失
                 for client in clients:
                     if client.cluster_identity == j:
-                        # data_size = len(client.train_samples) # train_samples might not be up-to-date or representative
-                        data_size = len(client.train_loader.dataset) if client.train_loader else 0
-                        if data_size > 0:
-                            # Ensure client.get_loss uses appropriate data (e.g., a validation split or recent train data)
-                            # For simplicity, using train_loader here, assuming get_loss can handle it or uses client.test_loader
-                            loss = client.get_loss(self.global_models[i], loader=client.train_loader) # Pass loader
-                            total_loss += loss * data_size
-                            total_data_size += data_size
+                        client_data_size = len(client.train_data) if client.train_data else 0
+                        if client_data_size > 0:
+                            # 使用 client.get_loss 计算模型 i 在该客户端数据上的损失
+                            # self.global_models[i] 是模型，client.train_data 是数据样本列表
+                            loss_on_client = client.get_loss(self.global_models[i], client.train_data, self.batch_size)
+                            if loss_on_client != float('inf'):
+                                total_loss_model_i_on_cluster_j += loss_on_client * client_data_size
+                                total_data_size_in_cluster_j += client_data_size
                 
-                if total_data_size > 0:
-                    loss_matrix[i][j] = total_loss / total_data_size
+                if total_data_size_in_cluster_j > 0:
+                    loss_matrix[i][j] = total_loss_model_i_on_cluster_j / total_data_size_in_cluster_j
+                else:
+                    loss_matrix[i][j] = -1.0 # 标记为无效或无穷大，表示无法计算
         
         # 计算集群间距离
-        cluster_distances = np.full((global_model_num, global_model_num), -1.0) # Initialize with -1
+        # cluster_distances[i][j] 表示集群 i 和集群 j 之间的距离
+        cluster_distances = np.full((global_model_num, global_model_num), -1.0)
         for i in range(global_model_num):
-            for j in range(i, global_model_num): # Iterate j from i to avoid redundant calculations and self-comparison for dist
-                if loss_matrix[i][j] == -1 or loss_matrix[j][i] == -1 or loss_matrix[i][i] == -1 or loss_matrix[j][j] == -1 :
-                    # 集群i或集群j中没有客户端, or self-loss is undefined
+            for j in range(i + 1, global_model_num): # 仅计算上三角，避免重复和自比较
+                if loss_matrix[i][j] == -1.0 or loss_matrix[j][i] == -1.0 or \
+                   loss_matrix[i][i] == -1.0 or loss_matrix[j][j] == -1.0:
+                    # 如果任何必要的损失值无效，则距离无效
                     dist = -1.0 
                 else:
-                    # 计算基于交叉损失的集群间距离
-                    dist = max(loss_matrix[i][j] - loss_matrix[i][i], loss_matrix[j][i] - loss_matrix[j][j], 0)
+                    # FedDrift.py 中的距离定义: dist = max(loss_matrix[i][j] - loss_matrix[i][i], loss_matrix[j][i] - loss_matrix[j][j], 0)
+                    # 这个定义衡量的是一个集群的模型在另一个集群数据上的表现相对于其自身集群数据的表现的恶化程度。
+                    dist = max(loss_matrix[i][j] - loss_matrix[i][i], loss_matrix[j][i] - loss_matrix[j][j], 0.0)
                 
                 cluster_distances[i][j] = dist
                 cluster_distances[j][i] = dist  # 对称矩阵
         
-        # 检查是否有集群需要合并
-        deleted_models_indices = [] # Store original indices of models to be deleted
-        
-        # Create a mapping for current model indices to original indices if models are iteratively deleted
-        current_model_indices = list(range(global_model_num))
-
+        deleted_models_indices = [] # 存储要删除的模型的原始索引
 
         while True:
-            num_active_models = len(self.global_models) - len(deleted_models_indices)
-            if num_active_models <=1:
+            current_num_models = len(self.global_models) - len(deleted_models_indices)
+            if current_num_models <= 1:
                 break
 
-            # 计算每个集群的数据大小
-            cluster_data_size = np.zeros(global_model_num) # Use original indexing for data size calculation
+            # 计算每个活动集群的数据大小
+            # cluster_data_size 的索引对应于原始的 global_model_num
+            cluster_data_size = np.zeros(global_model_num)
+            active_original_indices = [idx for idx in range(global_model_num) if idx not in deleted_models_indices]
+
             for client in clients:
-                if client.cluster_identity is not None and client.cluster_identity < global_model_num : # Check bounds
-                    cluster_data_size[client.cluster_identity] += (len(client.train_loader.dataset) if client.train_loader else 0)
+                if client.cluster_identity is not None and client.cluster_identity in active_original_indices:
+                    client_data_len = len(client.train_data) if client.train_data else 0
+                    cluster_data_size[client.cluster_identity] += client_data_len
             
-            # 寻找最小距离的集群对 among active models
-            min_dist_val = self.detection_threshold
-            merge_pair = None
+            min_dist_val = self.detection_threshold # 使用检测阈值作为合并的最小距离上限
+            merge_pair_original_indices = None
 
-            # Iterate through current_model_indices to find active models
-            active_indices = [idx for idx in range(global_model_num) if idx not in deleted_models_indices]
-
-            for idx1_ptr, orig_idx1 in enumerate(active_indices):
-                for idx2_ptr in range(idx1_ptr + 1, len(active_indices)):
-                    orig_idx2 = active_indices[idx2_ptr]
+            # 在活动的集群中寻找最小距离的集群对
+            for idx1_ptr in range(len(active_original_indices)):
+                orig_idx1 = active_original_indices[idx1_ptr]
+                for idx2_ptr in range(idx1_ptr + 1, len(active_original_indices)):
+                    orig_idx2 = active_original_indices[idx2_ptr]
                     
                     current_dist = cluster_distances[orig_idx1][orig_idx2]
                     if current_dist != -1.0 and current_dist < min_dist_val:
                         min_dist_val = current_dist
-                        merge_pair = (orig_idx1, orig_idx2)
+                        merge_pair_original_indices = (orig_idx1, orig_idx2)
             
-            if merge_pair is None: # 没有可合并的集群
+            if merge_pair_original_indices is None: # 没有可合并的集群
                 break
             
-            cluster_i, cluster_j = merge_pair # These are original indices
+            # cluster_i_orig 和 cluster_j_orig 是原始索引
+            cluster_i_orig, cluster_j_orig = merge_pair_original_indices
             
-            # 合并集群 (cluster_i will absorb cluster_j)
-            size_i = cluster_data_size[cluster_i]
-            size_j = cluster_data_size[cluster_j]
+            # 合并集群 (cluster_i_orig 将吸收 cluster_j_orig)
+            # FedDrift.py 论文中，模型 k 是合并后的模型，这里我们将 cluster_i_orig 作为模型 k
+            size_i = cluster_data_size[cluster_i_orig]
+            size_j = cluster_data_size[cluster_j_orig]
             
+            print(f"尝试合并集群 {cluster_j_orig} (大小: {size_j}) 到集群 {cluster_i_orig} (大小: {size_i})，距离: {min_dist_val:.4f}")
+
             if size_i + size_j > 0:
-                model_i_params = parameters_to_vector(self.global_models[cluster_i].parameters())
-                model_j_params = parameters_to_vector(self.global_models[cluster_j].parameters())
+                model_i_params = parameters_to_vector(self.global_models[cluster_i_orig].parameters())
+                model_j_params = parameters_to_vector(self.global_models[cluster_j_orig].parameters())
                 
                 merged_model_params = ((size_i * model_i_params + size_j * model_j_params) / (size_i + size_j))
-                
-                vector_to_parameters(merged_model_params, self.global_models[cluster_i].parameters())
-                
-                if cluster_j not in deleted_models_indices:
-                    deleted_models_indices.append(cluster_j)
-                
-                print(f"合并集群 {cluster_j} 到集群 {cluster_i} (原始索引)")
-                
-                # 更新客户端分配: clients assigned to cluster_j are now assigned to cluster_i
-                for client in clients:
-                    if client.cluster_identity == cluster_j:
-                        client.cluster_identity = cluster_i
-                
-                # Update distances involving cluster_i. Distances involving cluster_j become invalid.
-                # For simplicity, we can re-evaluate distances in the next iteration or mark cluster_j's distances as unusable.
-                # Mark distances related to cluster_j as -1 (or a very large number)
-                for k_idx in range(global_model_num):
-                    cluster_distances[cluster_j, k_idx] = -1.0
-                    cluster_distances[k_idx, cluster_j] = -1.0
-                    if k_idx != cluster_i and k_idx not in deleted_models_indices: # Update distances for cluster_i with other active clusters
-                        # Re-calculate or approximate new distance for (cluster_i, k_idx)
-                        # This part can be complex; a simpler approach is to let the loop re-evaluate based on updated loss_matrix if merge_clusters is called iteratively
-                        # For now, we assume the initial distance calculation is sufficient or merge_clusters is called once per round.
-                        # A more robust way would be to update loss_matrix[cluster_i] and recompute relevant cluster_distances.
-                        # Let's assume the current distance update logic in the original code was:
-                        # dist = max(cluster_distances[cluster_i][l], cluster_distances[cluster_j][l])
-                        # This seems like an approximation.
-                        if k_idx != cluster_i: # Update distance between the merged cluster (i) and other clusters (k_idx)
-                            # This logic needs to be sound. The original code had:
-                            # dist = max(cluster_distances[cluster_i][l], cluster_distances[cluster_j][l])
-                            # This might not be theoretically perfect.
-                            # A better way might be to re-evaluate loss of merged model i on data of cluster k, and vice-versa.
-                            # For now, let's stick to a simpler update or rely on next round's full re-evaluation.
-                            # To avoid complex re-computation here, we can just invalidate cluster_j's distances.
-                            # The next call to merge_clusters (if any) or the main loop will handle it.
-                            pass
-
-
-            else: # One or both clusters had no data, mark j for deletion if it was chosen
-                 if cluster_j not in deleted_models_indices:
-                    deleted_models_indices.append(cluster_j)
-
-
-        # Actual deletion and re-indexing
-        if deleted_models_indices:
-            deleted_models_indices.sort(reverse=True) # Delete from largest index to smallest
+                vector_to_parameters(merged_model_params, self.global_models[cluster_i_orig].parameters())
+            # else: 两个集群都没有数据点，模型参数不合并，但逻辑上 cluster_j_orig 仍然被合并
             
-            new_global_models = []
-            old_to_new_idx_map = {}
+            if cluster_j_orig not in deleted_models_indices:
+                deleted_models_indices.append(cluster_j_orig)
+            
+            print(f"集群 {cluster_j_orig} 已合并到集群 {cluster_i_orig} (原始索引)")
+
+            # 更新受影响客户端的集群身份
+            for client in clients:
+                if client.cluster_identity == cluster_j_orig:
+                    client.cluster_identity = cluster_i_orig
+            
+            # 更新 cluster_distances 矩阵以反映合并
+            # FedDrift.py 的逻辑: 对于其他集群 l，到新合并集群的距离是 max(dist(l,i), dist(l,j))
+            # 然后将 cluster_j 的距离标记为无效
+            for l_orig_idx_ptr in range(len(active_original_indices)):
+                l_orig = active_original_indices[l_orig_idx_ptr]
+                if l_orig == cluster_i_orig or l_orig == cluster_j_orig: # 跳过合并中的集群自身
+                    continue
+                
+                dist_l_i = cluster_distances[l_orig][cluster_i_orig]
+                dist_l_j = cluster_distances[l_orig][cluster_j_orig]
+
+                if dist_l_i == -1.0 and dist_l_j == -1.0:
+                    new_dist_l_merged = -1.0
+                elif dist_l_i == -1.0:
+                    new_dist_l_merged = dist_l_j
+                elif dist_l_j == -1.0:
+                    new_dist_l_merged = dist_l_i
+                else:
+                    new_dist_l_merged = max(dist_l_i, dist_l_j)
+                
+                cluster_distances[l_orig][cluster_i_orig] = new_dist_l_merged
+                cluster_distances[cluster_i_orig][l_orig] = new_dist_l_merged
+
+            # 将 cluster_j_orig 的所有距离标记为无效，因为它已被合并
+            cluster_distances[cluster_j_orig, :] = -1.0
+            cluster_distances[:, cluster_j_orig] = -1.0
+            # loss_matrix 也应该相应更新，但 FedDrift.py 的参考实现似乎主要依赖于更新后的 cluster_distances
+            # 为了简化，我们不在这里重新计算整个 loss_matrix，因为下一次 merge_clusters 调用会重新计算它。
+            # 但在当前的 while True 循环中，这可能导致后续迭代使用部分过时的 loss_matrix（如果它被其他地方间接使用）。
+            # FedDrift.py 的 while 循环似乎直接操作 cluster_distances 来寻找下一个合并对。
+
+        # 循环结束后，根据 deleted_models_indices 清理 self.global_models
+        if deleted_models_indices:
+            deleted_models_indices.sort(reverse=True) # 按索引降序删除
+            
+            # 创建旧索引到新索引的映射
+            old_to_new_map = {}
             current_new_idx = 0
-            for old_idx in range(global_model_num):
-                if old_idx not in deleted_models_indices:
-                    new_global_models.append(self.global_models[old_idx])
-                    old_to_new_idx_map[old_idx] = current_new_idx
+            for i in range(global_model_num):
+                if i not in deleted_models_indices:
+                    old_to_new_map[i] = current_new_idx
                     current_new_idx += 1
             
-            self.global_models = new_global_models
-            
-            # Update client cluster identities
-            for client in clients:
+            # 更新客户端的集群ID
+            for client in clients: # 更新所有客户端，不仅仅是 selected_clients
                 if client.cluster_identity is not None:
-                    if client.cluster_identity in deleted_models_indices:
-                        # This should not happen if they were reassigned, but as a fallback:
-                        print(f"警告: 客户端 {client.id} 仍分配给已删除的集群 {client.cluster_identity}。")
-                        # Attempt to reassign or mark as None. For now, map to the absorbed cluster if possible.
-                        # This part needs careful handling based on the merge logic.
-                        # If cluster_j was merged into cluster_i, clients of j should now be i.
-                        # The re-assignment happened above. Now we just need to map old indices to new ones.
+                    if client.cluster_identity in old_to_new_map:
+                        client.cluster_identity = old_to_new_map[client.cluster_identity]
+                    elif client.cluster_identity in deleted_models_indices: # 指向一个被删除的集群
+                        # 这种情况理论上不应该发生，因为上面已经将这些客户端重新分配给了 cluster_i_orig
+                        # 但作为安全措施，如果发生了，需要处理
+                        print(f"警告: 客户端 {client.id} 的集群ID {client.cluster_identity} 指向一个刚被删除的集群。检查合并逻辑。将其重新分配给映射后的吸收集群或默认集群。")
+                        # 尝试找到它被合并到的集群的新索引
+                        # 这个逻辑比较复杂，因为不知道它具体被合并到了哪个保留的集群。 
+                        # 最安全的是在合并时就正确更新所有客户端的指向。
+                        # 鉴于上面的 for client in clients: if client.cluster_identity == cluster_j_orig: client.cluster_identity = cluster_i_orig
+                        # 这里的 client.cluster_identity 应该是 cluster_i_orig (如果它之前是 cluster_j_orig)
+                        # 所以它应该在 old_to_new_map 中。
+                        # 如果 client.cluster_identity 本身就是一个被删除的索引，但不是 cluster_j_orig，则存在问题。
+                        # 假设上面的客户端身份更新是正确的，这里不需要特别处理指向 deleted_models_indices 的情况。
                         pass 
-                    if client.cluster_identity in old_to_new_idx_map:
-                         client.cluster_identity = old_to_new_idx_map[client.cluster_identity]
-                    else:
-                        # This case implies client was assigned to a deleted cluster that wasn't properly remapped
-                        # or an index out of bounds.
-                        print(f"警告: 客户端 {client.id} 的集群身份 {client.cluster_identity} 无法映射到新索引。")
-                        client.cluster_identity = None # Or handle as a new drift
-
+            
+            # 更新全局模型列表
+            new_global_models = []
+            for i in range(global_model_num):
+                if i not in deleted_models_indices:
+                    new_global_models.append(self.global_models[i])
+            self.global_models = new_global_models
+            print(f"集群合并后，全局模型数量: {len(self.global_models)}")
 
     def evaluate(self, current_round=None): # Added current_round
         """
@@ -461,170 +481,202 @@ class FedDrift(Server):
             }, step=current_round)
         return stats
 
-    def save_models(self, current_round=None): # Added current_round
-        """保存所有当前的全局模型 (每个集群一个)"""
-        if not (self.args.wandb and self.args.wandb_save_model):
-            print("WandB模型保存未启用。跳过模型保存到WandB。")
-            # Still save locally if needed, or remove local save if only wandb is desired
-            # The original code didn't show local saving here, assuming it was handled by serverbase or not done for FedDrift's multiple models.
-            # For now, let's focus on wandb saving.
-            # A local save might look like:
-            # for idx, model in enumerate(self.global_models):
-            #     model_path = os.path.join(self.save_folder_name, f"feddrift_model_cluster_{idx}_round_{current_round}.pt")
-            #     torch.save(model.state_dict(), model_path)
-            # print(f"FedDrift 模型已本地保存到 {self.save_folder_name}")
-            return
-
-        if current_round is None:
-            current_round = self.global_rounds # Fallback if not provided, e.g. called at end of training
-
-        for idx, model_to_save in enumerate(self.global_models):
-            model_artifact_name = f"{self.args.wandb_run_name}_cluster_{idx}_model"
-            model_filename = f"feddrift_cluster_{idx}_model_round_{current_round}.pt"
-            
-            # Create a temporary path for the model file
-            temp_model_dir = "wandb_temp_models"
-            os.makedirs(temp_model_dir, exist_ok=True)
-            local_model_path = os.path.join(temp_model_dir, model_filename)
-            
-            torch.save(model_to_save.state_dict(), local_model_path)
-            
-            try:
-                artifact = wandb.Artifact(
-                    name=model_artifact_name,
-                    type="model",
-                    description=f"FedDrift global model for cluster {idx} at round {current_round}",
-                    metadata={"round": current_round, "cluster_id": idx, "algorithm": "FedDrift"}
-                )
-                artifact.add_file(local_model_path, name=model_filename)
-                wandb.log_artifact(artifact)
-                print(f"FedDrift 模型 (集群 {idx}) 已作为 Artifact '{model_artifact_name}' 保存到 W&B (文件: {model_filename})")
-            except Exception as e:
-                print(f"错误: 保存 FedDrift 模型 (集群 {idx}) 到 W&B Artifact 失败: {e}")
-            finally:
-                # Clean up the temporary file
-                if os.path.exists(local_model_path):
-                    os.remove(local_model_path)
-        # Clean up the temporary directory if empty
-        if os.path.exists(temp_model_dir) and not os.listdir(temp_model_dir):
-            os.rmdir(temp_model_dir)
-
-
-    def visualize_clustering(self, round_idx):
+    def save_models(self, current_round=None):
         """
-        可视化客户端集群分布
-        
-        Args:
-            round_idx: 当前轮次
+        保存所有全局模型
         """
-        # Ensure results directory exists (already in original code)
-        viz_dir = os.path.join(self.results_dir, "clustering_visualizations") # Use self.results_dir
-        os.makedirs(viz_dir, exist_ok=True)
+        model_path = os.path.join("models", self.dataset, self.algorithm)
+        if not os.path.exists(model_path):
+            os.makedirs(model_path)
         
-        # 收集客户端ID和集群ID
-        # Use selected_clients for visualization as they participated in this round's clustering
-        client_ids = [client.id for client in self.selected_clients]
-        cluster_ids = [client.cluster_identity for client in self.selected_clients]
-        
-        # Filter out clients with no cluster assignment for visualization
-        valid_clients_data = [(cid, clid) for cid, clid in zip(client_ids, cluster_ids) if clid is not None]
-        if not valid_clients_data:
-            print(f"轮次 {round_idx}: 没有客户端分配到集群，跳过可视化。")
-            return
-        
-        client_ids_viz, cluster_ids_viz = zip(*valid_clients_data)
+        for i, model in enumerate(self.global_models):
+            model_filename = f"server_model_cluster_{i}_round_{current_round if current_round is not None else self.current_round}.pt"
+            model_filepath = os.path.join(model_path, model_filename)
+            torch.save(model.state_dict(), model_filepath)
+            
+            if self.args.save_global_model_to_wandb and wandb.run is not None:
+                # wandb.save(model_filepath) # This saves the file, not logs as artifact
+                artifact = wandb.Artifact(f'{self.algorithm}_global_model_cluster_{i}', type='model')
+                artifact.add_file(model_filepath)
+                wandb.log_artifact(artifact, aliases=[f"round_{current_round if current_round is not None else self.current_round}"])
 
-        plt.figure(figsize=(10, 8))
-        # Ensure unique_clusters_viz is derived from cluster_ids_viz which has no Nones
-        unique_clusters_viz = sorted(list(set(cluster_ids_viz))) # Sort for consistent coloring
-        
-        if not unique_clusters_viz: # Should be caught by valid_clients_data check, but as a safeguard
-             plt.close()
-             return
-
-        colors = plt.cm.rainbow(np.linspace(0, 1, len(unique_clusters_viz)))
-        color_map = {cluster_id: colors[i] for i, cluster_id in enumerate(unique_clusters_viz)}
-
-        scatter_colors = [color_map[c] for c in cluster_ids_viz]
-        
-        plt.scatter(client_ids_viz, cluster_ids_viz, c=scatter_colors, alpha=0.6, s=100)
-        
-        plt.title(f'客户端集群分布 (轮次 {round_idx})', fontsize=16)
-        plt.xlabel('客户端ID', fontsize=14)
-        plt.ylabel('集群ID', fontsize=14)
-        plt.grid(True, linestyle='--', alpha=0.7)
-        
-        # Create a colorbar legend manually if needed, or ensure cluster IDs are interpretable
-        # For simplicity, the direct scatter plot is kept. A legend might be:
-        # handles = [plt.Line2D([0], [0], marker='o', color='w', label=f'Cluster {uid}', 
-        #                       markerfacecolor=color_map[uid]) for uid in unique_clusters_viz]
-        # plt.legend(handles=handles, title="Clusters")
-
-        plot_filename = f"cluster_round_{round_idx}.png"
-        plot_filepath = os.path.join(viz_dir, plot_filename)
-        plt.savefig(plot_filepath)
-        plt.close()
-        print(f"集群可视化图已保存到 {plot_filepath}")
-
-        if self.args.wandb and self.args.wandb_save_artifacts:
-            try:
-                artifact_name = f"cluster_visualization_round_{round_idx}"
-                artifact = wandb.Artifact(
-                    name=artifact_name,
-                    type="visualization",
-                    description=f"客户端集群分布图在轮次 {round_idx} (FedDrift)",
-                    metadata={"round": round_idx, "algorithm": "FedDrift"}
-                )
-                artifact.add_file(plot_filepath, name=plot_filename)
-                wandb.log_artifact(artifact)
-                # Log as image directly to see in W&B dashboard media panel
-                wandb.log({f"FedDrift/Clustering/Round_{round_idx}": wandb.Image(plot_filepath), "round": round_idx})
-                print(f"集群可视化图 (轮次 {round_idx}) 已作为 Artifact '{artifact_name}' 保存到 W&B。")
-            except Exception as e:
-                print(f"错误: 保存集群可视化图 (轮次 {round_idx}) 到 W&B Artifact 失败: {e}")
-
+        print(f"所有 {len(self.global_models)} 个全局模型已保存到 {model_path}")
 
     def plot_cluster_evolution(self):
         """
-        绘制集群数量随时间的变化
+        绘制集群数量随轮次变化的图表
         """
-        if not self.cluster_counts: # No data to plot
-            print("没有集群数量数据可供绘制演变图。")
+        if not self.cluster_counts:
+            print("没有集群数量数据可供绘制。")
+            return
+        
+        plt.figure()
+        plt.plot(range(len(self.cluster_counts)), self.cluster_counts, marker='o')
+        plt.title("集群数量演变")
+        plt.xlabel("全局轮次")
+        plt.ylabel("集群数量")
+        plt.grid(True)
+        
+        # 保存图表
+        plot_path = os.path.join(self.save_folder_name, "results", f"{self.dataset}_{self.algorithm}_cluster_evolution.png")
+        if not os.path.exists(os.path.dirname(plot_path)):
+            os.makedirs(os.path.dirname(plot_path))
+        plt.savefig(plot_path)
+        print(f"集群演变图已保存到: {plot_path}")
+        if self.args.use_wandb and wandb.run is not None:
+            wandb.log({"FedDrift/Cluster Evolution Plot": wandb.Image(plot_path)})
+        plt.close()
+
+    def visualize_clustering(self, current_round):
+        """
+        使用t-SNE可视化客户端的集群分配（基于模型参数或特征表示）
+        注意: 这可能非常耗时，特别是对于大型模型或大量客户端。
+        """
+        if not self.selected_clients or not self.global_models:
+            print("没有足够的客户端或全局模型进行可视化。")
             return
 
-        viz_dir = os.path.join(self.results_dir, "clustering_visualizations") # Use self.results_dir
-        os.makedirs(viz_dir, exist_ok=True)
-        
-        plt.figure(figsize=(12, 6))
-        plt.plot(range(len(self.cluster_counts)), self.cluster_counts, marker='o', 
-                linestyle='-', linewidth=2, markersize=8)
-        
-        plt.title('集群数量随轮次的变化 (FedDrift)', fontsize=16)
-        plt.xlabel('轮次', fontsize=14)
-        plt.ylabel('集群数量', fontsize=14)
-        plt.grid(True, linestyle='--', alpha=0.7) # Corrected linestyle
-        
-        plot_filename = "cluster_evolution.png"
-        plot_filepath = os.path.join(viz_dir, plot_filename)
-        plt.savefig(plot_filepath)
-        plt.close()
-        print(f"集群演变图已保存到 {plot_filepath}")
+        print(f"在轮次 {current_round} 可视化集群...")
+        client_model_vectors = []
+        client_ids_for_plot = []
+        client_assigned_clusters = []
 
-        if self.args.wandb and self.args.wandb_save_artifacts:
-            try:
-                artifact_name = "feddrift_cluster_evolution_plot"
-                artifact = wandb.Artifact(
-                    name=artifact_name,
-                    type="visualization",
-                    description="FedDrift 集群数量随轮次的变化图",
-                    metadata={"algorithm": "FedDrift", "total_rounds": len(self.cluster_counts)}
-                )
-                artifact.add_file(plot_filepath, name=plot_filename)
-                wandb.log_artifact(artifact)
-                # Log as image directly
-                wandb.log({"FedDrift/Clustering/Evolution": wandb.Image(plot_filepath)})
-                print(f"集群演变图已作为 Artifact '{artifact_name}' 保存到 W&B。")
-            except Exception as e:
-                print(f"错误: 保存集群演变图到 W&B Artifact 失败: {e}")
+        for client in self.selected_clients:
+            if client.cluster_identity is not None:
+                # 使用客户端本地模型的参数作为表示
+                client_model_vectors.append(parameters_to_vector(client.model.parameters()).cpu().detach().numpy())
+                client_ids_for_plot.append(client.id)
+                client_assigned_clusters.append(client.cluster_identity)
+        
+        if not client_model_vectors:
+            print("没有可用于可视化的客户端模型向量。")
+            return
+
+        client_model_vectors = np.array(client_model_vectors)
+        
+        # 使用t-SNE降维
+        tsne = TSNE(n_components=2, random_state=0, perplexity=min(30, len(client_model_vectors)-1) if len(client_model_vectors) > 1 else 1)
+        try:
+            embedded_vectors = tsne.fit_transform(client_model_vectors)
+        except Exception as e:
+            print(f"t-SNE降维失败: {e}")
+            return
+
+        plt.figure(figsize=(10, 8))
+        unique_cluster_ids = sorted(list(set(client_assigned_clusters)))
+        
+        # 为每个集群选择一种颜色
+        # colors = plt.cm.get_cmap('viridis', len(unique_cluster_ids))
+        # 使用更明确的颜色列表，以防 unique_cluster_ids 数量少于 cmap 默认值
+        cmap = plt.get_cmap('tab10') # tab10 最多支持10个不同的颜色
+        colors = [cmap(i) for i in np.linspace(0, 1, len(unique_cluster_ids))]
+
+        for i, cluster_id in enumerate(unique_cluster_ids):
+            indices = [idx for idx, c_id in enumerate(client_assigned_clusters) if c_id == cluster_id]
+            if indices:
+                plt.scatter(embedded_vectors[indices, 0], embedded_vectors[indices, 1], label=f'Cluster {cluster_id}', color=colors[i % len(colors)])
+        
+        plt.title(f'客户端集群可视化 (t-SNE) - 轮次 {current_round}')
+        plt.xlabel('t-SNE Component 1')
+        plt.ylabel('t-SNE Component 2')
+        plt.legend()
+        plt.grid(True)
+        
+        # 保存图表
+        plot_filename = f"{self.dataset}_{self.algorithm}_tsne_clusters_round_{current_round}.png"
+        plot_path = os.path.join(self.save_folder_name, "results", plot_filename)
+        if not os.path.exists(os.path.dirname(plot_path)):
+            os.makedirs(os.path.dirname(plot_path))
+        plt.savefig(plot_path)
+        print(f"t-SNE集群可视化图已保存到: {plot_path}")
+        if self.args.use_wandb and wandb.run is not None:
+            wandb.log({f"FedDrift/t-SNE Visualization Round {current_round}": wandb.Image(plot_path)}, step=current_round)
+        plt.close()
+
+    def evaluate(self, acc=None, loss=None, current_round=None):
+        """
+        评估所有全局模型，并报告加权平均性能。
+        """
+        if not self.global_models:
+            print("没有全局模型可供评估。")
+            return {'acc': 0, 'loss': float('inf')}
+
+        total_test_samples = 0
+        total_weighted_acc = 0
+        total_weighted_loss = 0
+        num_models_evaluated = 0
+
+        # 确定哪些客户端属于哪个集群，以便正确分配测试数据
+        # 注意：这里的评估是在所有客户端的完整测试集上进行的，而不是仅在 selected_clients 上
+        # 这更符合全局模型性能的定义
+
+        # 为每个全局模型计算其在该模型对应集群的客户端上的平均性能
+        for model_idx, global_model_instance in enumerate(self.global_models):
+            model_test_samples = 0
+            model_correct_predictions = 0
+            model_total_loss = 0.0
+            clients_in_this_cluster = 0
+
+            for client in self.clients: # 遍历所有客户端
+                # 假设客户端的 cluster_identity 是最新的，并且指向当前 self.global_models 中的索引
+                if client.cluster_identity == model_idx:
+                    clients_in_this_cluster +=1
+                    # 使用客户端的测试加载器
+                    testloader = client.load_test_data() # 使用 clientbase 的 load_test_data
+                    if not testloader:
+                        continue
+                    
+                    # 将全局模型参数加载到临时模型或客户端模型中进行评估
+                    # 为避免干扰客户端自身模型，创建一个临时模型
+                    temp_model = copy.deepcopy(global_model_instance).to(self.device)
+                    temp_model.eval()
+                    
+                    with torch.no_grad():
+                        for x, y in testloader:
+                            if isinstance(x, list):
+                                x = [item.to(self.device) for item in x]
+                            else:
+                                x = x.to(self.device)
+                            y = y.to(self.device)
+                            
+                            outputs = temp_model(x)
+                            batch_loss = client.criterion(outputs, y) # 使用客户端的损失函数（通常是CrossEntropy）
+                            
+                            model_total_loss += batch_loss.item() * y.size(0)
+                            _, predicted = torch.max(outputs.data, 1)
+                            model_correct_predictions += (predicted == y).sum().item()
+                            model_test_samples += y.size(0)
+            
+            if model_test_samples > 0:
+                avg_model_acc = model_correct_predictions / model_test_samples
+                avg_model_loss = model_total_loss / model_test_samples
+                print(f"  模型 {model_idx} (有 {clients_in_this_cluster} 个客户端): 平均准确率={avg_model_acc:.4f}, 平均损失={avg_model_loss:.4f}")
+                
+                total_weighted_acc += avg_model_acc * model_test_samples # 按样本数加权
+                total_weighted_loss += avg_model_loss * model_test_samples
+                total_test_samples += model_test_samples
+                num_models_evaluated +=1
+            else:
+                print(f"  模型 {model_idx} (有 {clients_in_this_cluster} 个客户端): 没有测试样本或客户端。")
+
+        overall_avg_acc = total_weighted_acc / total_test_samples if total_test_samples > 0 else 0
+        overall_avg_loss = total_weighted_loss / total_test_samples if total_test_samples > 0 else float('inf')
+
+        print(f"总体加权平均测试准确率: {overall_avg_acc:.4f}")
+        print(f"总体加权平均测试损失: {overall_avg_loss:.4f}")
+        print(f"评估的全局模型数量: {num_models_evaluated} / {len(self.global_models)}")
+
+        if self.args.use_wandb and wandb.run is not None:
+            log_dict = {
+                "FedDrift/Overall Average Test Accuracy": overall_avg_acc,
+                "FedDrift/Overall Average Test Loss": overall_avg_loss,
+                "FedDrift/Number of Global Models Evaluated": num_models_evaluated,
+                "FedDrift/Total Global Models": len(self.global_models),
+                "round": current_round if current_round is not None else self.current_round
+            }
+            wandb.log(log_dict, step=current_round if current_round is not None else self.current_round)
+
+        # 返回总体平均值，用于 serverbase 中的 rs_test_acc 等列表
+        return {'acc': overall_avg_acc, 'loss': overall_avg_loss}
 
 

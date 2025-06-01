@@ -64,6 +64,8 @@ class Server(object):
         self.eval_new_clients = False
         self.fine_tuning_epoch = args.fine_tuning_epoch
 
+        self.current_round = 0
+
     def set_clients(self, clientObj):
         # Setup clients with correct id parameter
         for i, train_slow, send_slow in zip(range(self.num_clients), self.train_slow_clients, self.send_slow_clients):
@@ -457,3 +459,16 @@ class Server(object):
         ids = [c.id for c in self.new_clients]
 
         return ids, num_samples, tot_correct, tot_auc
+
+    def apply_drift_transformation(self):
+        if self.current_round == 100:  # Condition for drift
+            for client in self.selected_clients:
+                if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
+                    if hasattr(client, 'apply_drift_transformation'):
+                        print(f"Server: Applying drift for client {client.id} at round {self.current_round}")
+                        # Apply drift to both training and testing datasets on the client
+                        client.apply_drift_transformation()
+                    else:
+                        print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
+
+

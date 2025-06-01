@@ -18,8 +18,16 @@ class clientFedDrift(Client):
         self.model = copy.deepcopy(args.model)
         
         # FedDrift特有参数
-        self.prev_train_samples = copy.deepcopy(train_samples)  # 保存前一轮的训练数据
+        # self.prev_train_samples = copy.deepcopy(train_samples)  # 旧的错误初始化方式
         self.cluster_identity = 0  # 初始化集群身份
+
+        # 正确初始化 prev_train_samples
+        # self.train_data 是基类 Client 的属性，由 self.load_train_data() 填充
+        if self.train_data is None:
+            #确保 self.train_data 已加载
+            # load_train_data 也会处理在 clientbase 中配置的初始漂移应用
+            self.load_train_data() 
+        self.prev_train_samples = copy.deepcopy(self.train_data)
         
         # 优化器配置
         self.optimizer = torch.optim.SGD(
@@ -99,26 +107,47 @@ class clientFedDrift(Client):
     def clustering(self, global_models):
         """
         计算集群身份 - 检测概念漂移并选择最佳模型
-        
-        当检测到概念漂移时，返回None，表示需要创建新的全局模型
+        参考 FedDrift.py 的实现。
+        当检测到概念漂移时，cluster_identity 设置为 None。
         
         Args:
             global_models: 用于计算集群身份的全局模型列表
         """
+        if not global_models:
+            print(f"Client {self.id}: No global models to cluster with.")
+            self.cluster_identity = 0 # 或者 None，取决于后续逻辑如何处理
+            return
+
         prev_loss_list = []
         loss_list = []
         
         # 计算每个全局模型在前一轮训练数据上的损失
-        for model in global_models:
-            prev_loss = self.get_loss(model, self.prev_train_samples)
+        for model_idx, model in enumerate(global_models):
+            # prev_loss = self.get_loss(model, self.prev_train_samples) # self.prev_train_samples 是 list of tuples
+            # FedDrift.py 中的 get_loss(model, dataset, criterion, device)
+            # 我们的 self.get_loss(model, data_samples, batch_size)
+            # 需要确保 self.prev_train_samples 是正确的数据格式 (list of tuples)
+            prev_loss = self.get_loss(model, self.prev_train_samples, self.batch_size)
             prev_loss_list.append(prev_loss)
-        min_prev_loss = min(prev_loss_list)
+        
+        if not prev_loss_list: # 如果 prev_train_samples 为空或无法计算损失
+             min_prev_loss = float('inf')
+        else:
+            min_prev_loss = min(prev_loss_list)
         
         # 计算每个全局模型在当前训练数据上的损失
-        for model in global_models:
-            loss = self.get_loss(model, self.train_samples)
+        for model_idx, model in enumerate(global_models):
+            # loss = self.get_loss(model, self.train_data) # self.train_data 是 list of tuples
+            loss = self.get_loss(model, self.train_data, self.batch_size)
             loss_list.append(loss)
-        min_loss = min(loss_list)
+        
+        if not loss_list: # 如果 train_data 为空或无法计算损失
+            min_loss = float('inf')
+            self.cluster_identity = 0 # 或其他默认值
+            print(f"Client {self.id}: Could not calculate current losses for clustering. Defaulting to cluster 0.")
+            return
+        else:
+            min_loss = min(loss_list)
         
         # 获取检测阈值
         detection_threshold = self.args.detection_threshold if hasattr(self.args, 'detection_threshold') else 0.1
@@ -127,11 +156,11 @@ class clientFedDrift(Client):
         if min_loss > min_prev_loss + detection_threshold:
             # 检测到概念漂移，为所有漂移的客户端创建新模型
             self.cluster_identity = None
-            print(f"Client {self.id} detected concept drift! min_loss={min_loss:.4f}, min_prev_loss={min_prev_loss:.4f}")
+            print(f"Client {self.id} detected concept drift! min_loss={min_loss:.4f}, min_prev_loss={min_prev_loss:.4f}. Losses: {loss_list}, Prev Losses: {prev_loss_list}")
         else:
             # 从现有集群中选择最佳模型
             self.cluster_identity = int(np.argmin(loss_list))
-            print(f"Client {self.id} selected cluster {self.cluster_identity} (losses: {[round(l, 4) for l in loss_list]})")
+            print(f"Client {self.id} selected cluster {self.cluster_identity}. min_loss={min_loss:.4f}, min_prev_loss={min_prev_loss:.4f}. Losses: {loss_list}, Prev Losses: {prev_loss_list}")
     
     def train(self):
         """
@@ -181,4 +210,5 @@ class clientFedDrift(Client):
         """
         更新前一轮的训练样本
         """
-        self.prev_train_samples = copy.deepcopy(self.train_samples)
+        # self.train_data 来自基类 Client，包含当前的实际训练数据（元组列表）
+        self.prev_train_samples = copy.deepcopy(self.train_data)
