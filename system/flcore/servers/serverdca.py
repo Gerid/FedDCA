@@ -28,6 +28,7 @@ from sklearn.metrics import davies_bouldin_score, calinski_harabasz_score
 import traceback
 from functools import wraps
 import wandb # Added wandb import
+from torch.nn.utils import parameters_to_vector, vector_to_parameters # Added import
 
 def plot_metrics(train_loss_list=None, test_acc_list=None):
     def decorator(func):
@@ -82,6 +83,10 @@ class FedDCA(Server):
         self.set_slow_clients()
         self.set_clients(clientDCA)
         
+        self.clf_keys = []  # For model splitting
+        self.cluster_classifiers = {} # Stores aggregated classifier for each cluster {cluster_id: params_list}
+        self.client_data_size = {} # Stores data size for each client {client.id: size}
+
         self.cluster_inited = False
         self.args = args
         self.args.load_pretrain = False
@@ -98,7 +103,7 @@ class FedDCA(Server):
         
         # 新增：默认设置聚类方法为增强型标签条件聚类
         if not hasattr(args, 'clustering_method'):
-            self.args.clustering_method = 'enhanced_label'
+            args.clustering_method = 'enhanced_label' # Default to enhanced_label
             
         # 概念漂移相关参数设置
         self.drift_threshold = args.drift_threshold if hasattr(args, 'drift_threshold') else 0.1
@@ -769,203 +774,122 @@ class FedDCA(Server):
             print(traceback.format_exc())  # 打印详细错误信息
             return copy.deepcopy(models[0])
 
-    # def evaluate(self):
-    #     """评估当前模型性能"""
-    #     stats = {
-    #         'acc_per_client': [],
-    #         'loss_per_client': []
-    #     }
+    def set_clf_keys(self, clf_keys):
+        """Sets the classifier parameter names for splitting."""
+        self.clf_keys = clf_keys
+        if hasattr(self.args, 'verbose') and self.args.verbose:
+            print(f"FedDCA clf_keys: {self.clf_keys}")
 
-    #     for client in self.selected_clients:
-    #         try:
-    #             # 使用客户端的测试方法获取性能指标
-    #             test_acc, test_num, _ = client.test_metrics()
-    #             train_loss, train_num = client.train_metrics()
+    def send_rep_params(self, selected_clients):
+        """Send only representation parameters to clients."""
+        rep_params = [p.detach().clone() for name,p in self.global_model.named_parameters() if name not in self.clf_keys]
+        for client in selected_clients:
+            client.set_rep_params(rep_params)
+
+    def aggregate_rep(self, selected_clients):
+        """Aggregate representation parameters from clients."""
+        rep_names = [name for name,_ in self.global_model.named_parameters() if name not in self.clf_keys]
+        rep_params = [param for name,param in self.global_model.named_parameters() if name in rep_names]
+        vec = parameters_to_vector([param.detach() for param in rep_params])
+        agg = torch.zeros_like(vec)
+        total=0
+        for client in selected_clients:
+            client_vec = parameters_to_vector(client.get_rep_parameters())
+            w = getattr(client, 'train_samples', 1)
+            agg += client_vec * w; total+=w
+        if total>0: agg/= total
+        vector_to_parameters(agg, rep_params)
+            # Client training
+            for client in selected_clients:
+                # Concept drift handling for client (if applicable, from original FedDCA)
+                if self.use_drift_dataset and hasattr(client, 'update_iteration_status'):
+                    client.update_iteration_status(self.current_iteration % self.max_iterations, self.drift_data_dir)
                 
-    #             if test_num > 0:
-    #                 stats['acc_per_client'].append(test_acc / test_num)
-    #             if train_num > 0:
-    #                 stats['loss_per_client'].append(train_loss / train_num)
-    #         except Exception as e:
-    #             print(f"Error evaluating client {client.id}: {str(e)}")
-    #             continue
+                client.train() # Client trains its local model
 
-    #     # 计算并记录平均性能
-    #     if stats['acc_per_client']:
-    #         avg_acc = np.mean(stats['acc_per_client'])
-    #         self.rs_test_acc.append(avg_acc)
-    #         print(f"Average Test Accuracy: {100*avg_acc:.2f}%")
-        
-    #     if stats['loss_per_client']:
-    #         avg_loss = np.mean(stats['loss_per_client'])
-    #         print(f"Average Train Loss: {avg_loss:.4f}")
+            # Server aggregation
+            # 1. Aggregate representation layers
+            self.aggregate_rep(selected_clients) # Updates self.global_model's representation part
 
-    #     # 记录集群信息
-    #     cluster_stats = {}
-    #     for client_id, cluster_id in self.clusters.items():
-    #         if cluster_id not in cluster_stats:
-    #             cluster_stats[cluster_id] = {'count': 0}
-    #         cluster_stats[cluster_id]['count'] += 1
-
-    #     print("\nCluster Distribution:")
-    #     for cluster_id, stats in cluster_stats.items():
-    #         print(f"Cluster {cluster_id}: {stats['count']} clients")    @plot_metrics()
-    def train(self):
-        for i in range(self.global_rounds + 1):
-            s_t = time.time()
-            self.current_round = i # Keep track of current round
-
-            # 概念漂移处理 (如果启用)
-            # if self.use_drift_dataset:
-            #     print(f"\nUpdating client iteration to {self.current_iteration} for round {i}")
-            #     for client in self.clients: # Update for all clients, or selected_clients if selection happens before this
-            #         client.update_iteration(self.current_iteration)
-            #     if self.current_iteration in self.drift_iterations:
-            #         print(f"\n⚠️ Concept drift occurring at iteration {self.current_iteration} (Round {i})")
-            #         # Potentially log drift event to wandb
-            #         if wandb.run is not None:
-            #             wandb.log({"Concept Drift Event": 1, "Drift Iteration": self.current_iteration}, step=i)
-
-            self.selected_clients = self.select_clients()
-            
-            # 客户端聚类和模型分发
-            if i > 0 or not self.cluster_inited: # Perform clustering from the first round or if not initialized
-                print(f"\nPerforming clustering for round {i}...")
+            # 2. Perform FedDCA's original clustering (based on client features/proxy_data)
+            # This updates self.clusters
+            # cluster_update_freq: make sure this arg is available or use a default
+            cluster_update_freq = self.args.cluster_update_frequency if hasattr(self.args, 'cluster_update_frequency') else 5
+            if i % cluster_update_freq == 0 or not self.cluster_inited:
                 clustering_method = self.select_clustering_algorithm()
+                if self.args.verbose:
+                    print(f"Round {i}: Performing clustering using {clustering_method}")
                 if clustering_method == 'vwc':
-                    self.vwc_clustering() 
+                    self.collect_proxy_data() 
+                    self.vwc_clustering()
                 elif clustering_method == 'label_conditional':
-                    self.perform_label_conditional_clustering(verbose=True)
+                    self.collect_label_conditional_proxy_data()
+                    self.label_conditional_clustering()
                 elif clustering_method == 'enhanced_label':
-                    self.perform_enhanced_label_conditional_clustering(verbose=True)
-                else:
-                    self.vwc_clustering() # Default to VWC if method is unknown
+                    self.collect_label_conditional_proxy_data()
+                    self.perform_label_conditional_clustering(verbose=self.args.verbose)
                 self.cluster_inited = True
-                self.log_cluster_assignments(i) # Log cluster assignments to wandb
+            
+            # 3. Get classifier parameters from all selected clients
+            clients_clf_params_dict = self.get_clients_clf_params(selected_clients)
 
-            self.send_cluster_models() # Send appropriate cluster model to each client
+            # 4. Aggregate classifier for each cluster
+            self.cluster_classifiers = {} 
+            clients_by_cluster = {}
+            for client_obj in selected_clients: # Renamed to avoid conflict
+                cluster_id = self.clusters.get(client_obj.id)
+                if cluster_id is not None:
+                    if cluster_id not in clients_by_cluster:
+                        clients_by_cluster[cluster_id] = []
+                    clients_by_cluster[cluster_id].append(client_obj)
+            
+            for cluster_id, clients_in_this_cluster in clients_by_cluster.items():
+                aggregated_clf = self.aggregate_cluster_classifier(clients_in_this_cluster)
+                if aggregated_clf is not None:
+                    self.cluster_classifiers[cluster_id] = aggregated_clf
+                else: # Fallback if aggregation fails
+                    self.cluster_classifiers[cluster_id] = [p.clone() for name, p in self.global_model.named_parameters() if name in self.clf_keys]
 
-            if i % self.eval_gap == 0:
-                print(f"\n-------------Round number: {i}-------------")
-                print("\nEvaluate models (global and per-cluster if applicable)")
-                self.evaluate(current_round=i) # Evaluate global model (serverbase version)
-                # FedDCA might have its own cluster-specific evaluation, which also needs current_round
-                self.evaluate_cluster_performance(current_round=i) 
-
-            # 客户端训练
-            for client in self.selected_clients:
-                # Apply concept drift at specific round (e.g., round 100)
-                if i == 0: # Condition for drift
-                    if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
-                        if hasattr(client, 'apply_drift_transformation'):
-                            print(f"Server: Applying drift for client {client.id} at round {i}")
-                            # Apply drift to both training and testing datasets on the client
-                            client.apply_drift_transformation()
-                        else:
-                            print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
-                    # else:
-                        # print(f"Client {client.id} not configured for drift or use_drift_dataset is False at round {i}")
-
-                client.current_iteration = i # Pass current round for client-side logging if needed
-
-                client.train()
-
-            self.receive_models()
-            self.update_global_model() # This likely involves cluster-specific aggregation first, then global model update
-
-            # Concept alignment analysis (if applicable)
-            if hasattr(self.args, 'analyze_concept_alignment') and self.args.analyze_concept_alignment and (i % self.args.concept_analysis_interval == 0):
-                self.analyze_concept_alignment(current_round=i)
 
             self.Budget.append(time.time() - s_t)
-            print('-'*25, 'time cost', '-'*25, self.Budget[-1])
+            # Wandb logging for server time
+            if self.args.use_wandb and wandb.run is not None:
+                wandb.log({"Server_Time_Per_Round": self.Budget[-1], "Round": i})
 
-            if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
-                break
-            
-        print("\nBest accuracy.")
-        if self.rs_test_acc:
-            print(max(self.rs_test_acc))
-        print("\nAverage time cost per round.")
-        if len(self.Budget) > 1:
-            print(sum(self.Budget[1:]) / len(self.Budget[1:]))
+            if i % self.eval_gap == 0:
+                if self.args.verbose:
+                    print(f"\\n------------- Round {i} Evaluation -------------")
+                self.evaluate() # FedDCA's existing evaluate method
+                self.evaluate_cluster_performance(current_round=i) # If this method is relevant
+                self.log_cluster_assignments(current_round=i) # If this method is relevant
+
+            # Concept drift iteration update (if applicable, from original FedDCA)
+            if self.use_drift_dataset:
+                self.current_iteration += 1
+                if self.current_iteration >= self.max_iterations:
+                    if self.args.verbose:
+                        print("Max iterations for concept drift reached.")
+                    # Potentially reset or stop, depending on desired behavior
+
+        # Final results
+        if self.args.verbose:
+            print("\\nBest accuracy.")
+            if self.rs_test_acc: # rs_test_acc is from ServerBase
+                print(max(self.rs_test_acc))
+            print("\\nAverage time cost per round.")
+            if len(self.Budget) > 1:
+                print(round(np.mean(self.Budget[1:]), 2)) # Exclude potential setup time in round 0
 
         self.save_results()
-        self.save_global_model(current_round=self.global_rounds) # Save final model
-        if hasattr(self, 'save_concept_progress') and callable(self.save_concept_progress):
-            self.save_concept_progress(current_round=self.global_rounds) # Save final concept data
+        # self.save_global_model() # ServerBase has this, might need adjustment if only rep is "global"
+        # Or save global_rep and all cluster_classifiers
+        # For now, let ServerBase.save_global_model save the current self.global_model (which has updated rep)
 
 
-
-    def send_cluster_models(self):
-        assert (len(self.selected_clients) > 0)
-        for client in self.selected_clients:
-            cluster_id = self.clusters.get(client.id, 0) # Default to cluster 0 if not found
-            model_to_send = self.cluster_centroids.get(cluster_id, self.global_model) # Send cluster model or global if not found
-            client.set_parameters(model_to_send)
-
-    def evaluate_cluster_performance(self, current_round):
-        # This is a placeholder for FedDCA's specific cluster evaluation logic
-        # It should log metrics per cluster to wandb if possible
-        print(f"Evaluating cluster performance for round {current_round}...")
-        for cluster_id, model in self.cluster_centroids.items():
-            # Evaluate this cluster_model, similar to how global_model is evaluated in serverbase
-            # but on clients belonging to this cluster_id
-            cluster_clients = [c for c in self.clients if self.clusters.get(c.id) == cluster_id]
-            if not cluster_clients:
-                continue
-
-            num_samples = []
-            tot_correct = []
-            # Store original models to restore later
-            original_models = {c.id: copy.deepcopy(c.model) for c in cluster_clients}
-
-            for c in cluster_clients:
-                c.set_parameters(model) # Set cluster model for evaluation
-                ct, ns, auc = c.test_metrics() # Assuming test_metrics is available and returns (correct_preds, num_samples, auc_val)
-                tot_correct.append(ct*1.0)
-                num_samples.append(ns)
-            
-            # Restore original models
-            for c in cluster_clients:
-                c.set_parameters(original_models[c.id])
-
-            if sum(num_samples) > 0:
-                cluster_acc = sum(tot_correct) / sum(num_samples)
-                print(f"  Cluster {cluster_id} Test Accuracy: {cluster_acc:.4f}")
-                if wandb.run is not None:
-                    wandb.log({f"Cluster {cluster_id}/Test Accuracy": cluster_acc}, step=current_round)
-            else:
-                print(f"  Cluster {cluster_id}: No samples for evaluation.")
-
-    def log_cluster_assignments(self, current_round):
-        if wandb.run is not None and self.clusters:
-            # Log number of clients per cluster
-            cluster_counts = {f"Cluster {cid}/Client Count": 0 for cid in self.cluster_centroids.keys()}
-            for client_id, cluster_id in self.clusters.items():
-                if f"Cluster {cluster_id}/Client Count" in cluster_counts:
-                    cluster_counts[f"Cluster {cluster_id}/Client Count"] += 1
-                else: # Should not happen if cluster_centroids keys are source of truth
-                    cluster_counts[f"Cluster {cluster_id}/Client Count"] = 1
-            wandb.log(cluster_counts, step=current_round)
-
-            # Log individual client assignments if not too many clients
-            if len(self.clients) <= 50: # Arbitrary limit to prevent too much data
-                client_assignments_log = {}
-                for client in self.clients:
-                    client_assignments_log[f"Client {client.id}/Cluster Assignment"] = self.clusters.get(client.id, -1) # -1 if not assigned
-                wandb.log(client_assignments_log, step=current_round)
-
-    def analyze_concept_alignment(self, current_round):
-        # Placeholder for concept alignment analysis and logging to wandb
-        if hasattr(super(), 'analyze_concept_alignment') and callable(super().analyze_concept_alignment):
-            # This assumes analyze_concept_alignment is defined in a base or utility class
-            # and can log its findings to wandb internally or return them for logging here.
-            alignment_metrics = super().analyze_concept_alignment(self.clients, self.cluster_centroids, self.clusters, current_round)
-            if wandb.run is not None and alignment_metrics:
-                wandb.log(alignment_metrics, step=current_round)
-        else:
-            print("Concept alignment analysis method not found or not callable.")
+    # Remove or adapt old model update/sending logic if it conflicts
+    # def update_global_model(self): # Replaced by aggregate_rep
+    # def update_cluster_models(self): # Replaced by aggregate_cluster_classifier
+    # def send_cluster_models(self): # Replaced by logic in train loop
 
     # Ensure other methods like save_concept_progress also accept current_round if they save round-specific artifacts
     def save_concept_progress(self, current_round):

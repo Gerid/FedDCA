@@ -354,7 +354,10 @@ def run(args):
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
             server = FedDCA(args, i)
-            
+            # Determine and set classifier keys for split model (representation/classifier)
+            clf_keys = list(args.model.state_dict().keys())[-2:]
+            server.set_clf_keys(clf_keys)
+
         elif args.algorithm == "FedIFCA":
             args.head = copy.deepcopy(args.model.fc)            
             args.model.fc = nn.Identity()
@@ -629,7 +632,7 @@ if __name__ == "__main__":
 
     # Weights & Biases arguments
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
-    parser.add_argument('--wandb_project', type=str, default="FedPCA", help='Wandb project name')
+    parser.add_argument('--wandb_project', type=str, default="FedDCA", help='Wandb project name')
     parser.add_argument('--wandb_entity', type=str, default="Gerid", help='Wandb entity (username or team)') # User should set this
     parser.add_argument('--wandb_api_key', type=str, default="47b2a9d806ce037a46ec07b05d6f211af19728a3",
                         help='Wandb API key (optional, can be set as env var)')
@@ -686,7 +689,7 @@ if __name__ == "__main__":
     # Override with command-line arguments if they were changed from their defaults
     # This is implicitly handled because argparse already parsed them into args.
     # If a command-line arg was given, it's already in 'args' and won't be overwritten by YAML
-    # unless the YAML loading logic above is changed to always prefer YAML.
+    # unless the YAML loading logic above is changed to always prefer YAML
     # The current logic: YAML sets if argparse is default. If argparse is not default, it stays.
 
     # wandb specific args from YAML (if not overridden by command line)
