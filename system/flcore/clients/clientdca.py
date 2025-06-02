@@ -581,9 +581,9 @@ class clientDCA(Client):
         """根据当前迭代和漂移类型确定要使用的概念
         
         支持三种漂移类型:
-        1. 突变漂移(sudden drift): 在漂移点立即切换到新概念
-        2. 渐进漂移(gradual drift): 在漂移点周围窗口期内，逐渐从一个概念过渡到另一个
-        3. 周期漂移(recurring drift): 按照周期在可用概念间循环切换
+        1. 突变漂移(sudden): 在漂移点立即切换到新概念
+        2. 渐进漂移(gradual): 在漂移点周围窗口期内，逐渐从一个概念过渡到另一个
+        3. 周期漂移(recurring): 按照周期在可用概念间循环切换
         
         返回:
             当前应用的概念或混合概念
@@ -1058,3 +1058,21 @@ class clientDCA(Client):
                     }
         
         return base_pattern
+
+    def get_rep_parameters(self):
+        """Get representation (base) layer parameters from split model."""
+        return [p.clone().detach() for p in self.model.base.parameters()]
+
+    def get_clf_parameters(self):
+        """Get classifier (head) layer parameters from split model."""
+        return [p.clone().detach() for p in self.model.head.parameters()]
+
+    def set_rep_params(self, rep_params):
+        """Set representation (base) layer parameters for split model."""
+        for p, new_p in zip(self.model.base.parameters(), rep_params):
+            p.data.copy_(new_p.to(p.device))
+
+    def set_clf_params(self, clf_params):
+        """Set classifier (head) layer parameters for split model."""
+        for p, new_p in zip(self.model.head.parameters(), clf_params):
+            p.data.copy_(new_p.to(p.device))
