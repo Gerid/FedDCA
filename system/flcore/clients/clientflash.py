@@ -30,6 +30,8 @@ class clientFlash(Client):
             momentum=args.momentum if hasattr(args, 'momentum') else 0.9,
             weight_decay=args.weight_decay if hasattr(args, 'weight_decay') else 0.0001
         )
+        # Add grad_clip parameter
+        self.grad_clip = args.grad_clip if hasattr(args, 'grad_clip') else 10.0
 
     def train(self):
         """执行早停训练"""
@@ -62,6 +64,11 @@ class clientFlash(Client):
                 output = self.model(x)
                 loss = self.loss(output, y)
                 loss.backward()
+                
+                # Add gradient clipping here
+                if self.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                
                 self.optimizer.step()
             
             # 在验证集上计算损失
@@ -71,15 +78,13 @@ class clientFlash(Client):
             if self.prev_val_loss != -1:
                 delta = self.prev_val_loss - val_loss
                 if 0 < delta < self.loss_decrement / (epoch + 1):
-                    if hasattr(self.args, 'verbose') and self.args.verbose:
-                        print(f"客户端 {self.id} 早停在第 {epoch+1}/{max_local_epochs} 轮，损失下降 = {delta:.6f}")
                     break
             
             self.prev_val_loss = val_loss
         
         # 计算本地更新
         self.local_update = parameters_to_vector(self.model.parameters()) - init_params
-        
+
         # 更新训练时间
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - start_time

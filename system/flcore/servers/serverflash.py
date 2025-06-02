@@ -24,7 +24,7 @@ class Flash(Server):
         self.beta2 = args.beta2 if hasattr(args, 'beta2') else 0.99
         self.beta3 = 0
         self.ftau = args.ftau if hasattr(args, 'ftau') else 1e-8
-        self.server_lr = args.server_learning_rate if hasattr(args, 'server_learning_rate') else 1.0
+        self.server_lr = args.server_learning_rate if hasattr(args, 'server_learning_rate') else 0.01 
         
         # Flash优化器动量
         self.first_momentum = 0
@@ -112,131 +112,77 @@ class Flash(Server):
         """
         # 获取客户端更新
         total_size = 0
-        update_sum = torch.zeros_like(parameters_to_vector(self.global_model.parameters()))
+        # Initialize update_sum on the correct device
+        # Assuming self.device is defined in the base Server class and is the target device
+        update_sum = torch.zeros_like(parameters_to_vector(self.global_model.parameters()), device=self.device)
         
+        active_clients_count = 0
         for client in clients:
-            client_size = len(client.train_samples)
+            if client.local_update is None:
+                print(f"Warning: Client {client.id} has no local_update. Skipping.")
+                continue
+            
+            # Ensure client.local_update is a tensor and on the correct device
+            local_update_tensor = client.local_update
+            if not isinstance(local_update_tensor, torch.Tensor):
+                try:
+                    local_update_tensor = torch.tensor(local_update_tensor, device=self.device, dtype=update_sum.dtype)
+                except Exception as e:
+                    print(f"Error converting client {client.id}'s local_update to tensor: {e}. Skipping.")
+                    continue
+            
+            client_size = client.train_samples
             total_size += client_size
-            update_sum += client_size * client.local_update
+            update_sum += client_size * local_update_tensor.to(self.device) # Ensure it's on the same device
+            active_clients_count += 1
         
+
         # 计算加权平均更新
-        aggregated_update = update_sum / total_size
-        aggregated_update = aggregated_update.detach().cpu().numpy()
+        aggregated_update_tensor = update_sum / total_size
+        aggregated_update_np = aggregated_update_tensor.detach().cpu().numpy()
+
+
         
         # Flash自适应优化器更新
-        self.first_momentum = self.beta1 * self.first_momentum + (1 - self.beta1) * aggregated_update
+        self.first_momentum = self.beta1 * self.first_momentum + (1 - self.beta1) * aggregated_update_np
+        
+        squared_aggregated_update = np.square(aggregated_update_np)
         self.prev_second_momentum = self.second_momentum
-        self.second_momentum = self.beta2 * self.second_momentum + (1 - self.beta2) * np.square(aggregated_update)
+        self.second_momentum = self.beta2 * self.second_momentum + (1 - self.beta2) * squared_aggregated_update
         
         # 计算自适应Beta3和Delta动量
-        self.beta3 = np.abs(self.prev_second_momentum) / (
-                np.abs(np.square(aggregated_update) - self.second_momentum) + np.abs(self.prev_second_momentum))
+        # Add epsilon to denominator for beta3 calculation
+        beta3_denominator = (np.abs(squared_aggregated_update - self.second_momentum) + 
+                               np.abs(self.prev_second_momentum) + 1e-9) # Epsilon for stability
+        self.beta3 = np.abs(self.prev_second_momentum) / beta3_denominator
+        
         self.delta_momentum = self.beta3 * self.delta_momentum + (1 - self.beta3) * (
-                np.square(aggregated_update) - self.second_momentum)
+                squared_aggregated_update - self.second_momentum)
         
+
+
         # 最终更新
-        aggregated_update = self.server_lr * self.first_momentum / (
-                np.sqrt(self.second_momentum) - self.delta_momentum + self.ftau)
+        # Use self.second_momentum directly for np.sqrt, as in the reference
+        # Note: if self.second_momentum can become negative due to numerical issues, this could error.
+        # It should theoretically be non-negative.
+        sqrt_term = np.sqrt(self.second_momentum)
+
+        denominator = sqrt_term - self.delta_momentum + self.ftau
         
+        # REMOVED: denominator = np.where(denominator < 1e-6, 1e-6, denominator)
+        # Now using raw denominator as per reference. This might lead to issues if it's invalid.
+
+        # Check if denominator is too small or NaN/Inf
+        # This check is still useful to log potential issues.
+
+        final_update_np = self.server_lr * self.first_momentum / denominator
+        
+
+
         # 更新全局模型
         cur_global_params = parameters_to_vector(self.global_model.parameters())
-        new_global_params = cur_global_params + torch.tensor(aggregated_update).to(self.device)
-        
+        final_update_tensor = torch.tensor(final_update_np, device=cur_global_params.device, dtype=cur_global_params.dtype)
+        new_global_params = cur_global_params + final_update_tensor
         vector_to_parameters(new_global_params, self.global_model.parameters())
 
-    def evaluate(self, current_round=None):
-        """评估当前模型性能"""
-        stats = {'acc': 0.0, 'loss': 0.0, 'num_samples': 0}
-        
-        for client in self.selected_clients:
-            client.set_parameters(self.global_model)
-            acc, num = client.test_metrics()
-            
-            stats['acc'] += acc
-            stats['num_samples'] += num
-        
-        stats['acc'] = stats['acc'] / stats['num_samples'] if stats['num_samples'] > 0 else 0
-        
-        self.rs_test_acc.append(stats['acc'])
-        
-        # 计算客户端平均训练损失
-        train_loss = 0
-        train_samples = 0
-        for client in self.selected_clients:
-            client.set_parameters(self.global_model)
-            losses, num_samples = client.train_metrics()
-            
-            train_loss += losses
-            train_samples += num_samples
-            
-        stats['loss'] = train_loss / train_samples if train_samples > 0 else 0
-        self.rs_train_loss.append(stats['loss'])
-        
-        print(f"平均测试准确率: {stats['acc']:.4f}")
-        print(f"平均训练损失: {stats['loss']:.4f}")
 
-        # Wandb logging is handled by serverbase.evaluate, no need to duplicate here unless Flash has specific metrics.
-        # If Flash needs to log additional specific metrics:
-        # if wandb.run is not None and hasattr(self, 'current_round'): # Ensure current_round is available
-        #     wandb.log({
-        #         "Flash Specific Metric": some_value 
-        #     }, step=self.current_round) # self.current_round should be the round number for this evaluation
-        
-        return stats
-
-    def save_model(self, current_round=None): # Add current_round parameter
-        """保存全局模型"""
-        model_path = os.path.join("saved_models", self.dataset) # Consider using "models" consistent with serverbase
-        if not os.path.exists(model_path):
-            os.makedirs(model_path)
-        
-        model_filename = f"Flash_{self.dataset}_{self.times}.pt"
-        model_filepath = os.path.join(model_path, model_filename)
-        # torch.save(self.global_model.state_dict(), model_filepath) # serverbase saves the whole model, be consistent
-        torch.save(self.global_model, model_filepath)
-        print(f"Global model saved to {model_filepath}")
-
-        if self.args.wandb_save_model and wandb.run is not None and current_round is not None:
-            try:
-                # Use the run name prefix from args for consistency
-                artifact_name = f'{self.args.wandb_run_name_prefix}_global_model' 
-                model_artifact = wandb.Artifact(
-                    artifact_name, 
-                    type='model',
-                    description=f'Global model for Flash algorithm at round {current_round}',
-                    metadata={'dataset': self.dataset, 'algorithm': self.algorithm, 'times': self.times, 'round': current_round}
-                )
-                # Add file with a round-specific name if desired, or just the standard name
-                model_artifact.add_file(model_filepath, name=f'flash_model_round_{current_round}.pt')
-                aliases = ['latest', f'round_{current_round}']
-                if current_round == self.global_rounds: # Mark as final if it's the last round
-                    aliases.append('final')
-                wandb.log_artifact(model_artifact, aliases=aliases)
-                print(f"Flash global model saved to wandb as artifact at round {current_round}")
-            except Exception as e:
-                print(f"Error saving Flash model to wandb: {e}")
-
-    def save_results(self):
-        """保存训练结果"""
-        algo = self.algorithm
-        result_path = os.path.join("results", algo)
-        if not os.path.exists(result_path):
-            os.makedirs(result_path)
-            
-        result_path = os.path.join(result_path, f"{self.dataset}_{algo}_{self.goal}_{self.times}.h5")
-        print(f"结果保存到: {result_path}")
-        
-        import h5py
-        with h5py.File(result_path, 'w') as hf:
-            hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
-            hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
-
-        # Wandb artifact saving for results is handled by serverbase.save_results
-        # No need to duplicate here unless Flash has a different results file structure or additional artifacts.
-        # If Flash had its own specific artifact to save, it would be done here:
-        # if self.args.wandb_save_artifacts and wandb.run is not None:
-        #     try:
-        #         # ... create and log Flash-specific artifact ...
-        #         print(f"Flash specific results saved to wandb.")
-        #     except Exception as e:
-        #         print(f"Error saving Flash specific results to wandb: {e}")

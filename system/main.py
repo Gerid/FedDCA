@@ -411,7 +411,9 @@ def run(args):
             if not hasattr(args, 'ftau'):
                 args.ftau = 1e-8  # 数值稳定常数
             if not hasattr(args, 'server_learning_rate'):
-                args.server_learning_rate = 1.0  # 服务器学习率
+                args.server_learning_rate = 0.01 # 服务器学习率
+            if not hasattr(args, 'verbose'):
+                args.verbose = 1.0  # 服务器学习率
                 
             server = Flash(args, i)
 
@@ -550,7 +552,7 @@ if __name__ == "__main__":
     parser.add_argument('-se', "--server_epochs", type=int, default=1000)
     parser.add_argument('-lf', "--localize_feature_extractor", type=bool, default=False)
     # SCAFFOLD
-    parser.add_argument('-slr', "--server_learning_rate", type=float, default=1.0)
+    # parser.add_argument('-slr', "--server_learning_rate", type=float, default=1.0)
     # FedALA
     parser.add_argument('-et', "--eta", type=float, default=1.0)
     parser.add_argument('-s', "--rand_percent", type=int, default=80)
