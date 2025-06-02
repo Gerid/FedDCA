@@ -15,7 +15,7 @@ class clientALA(Client):
         self.rand_percent = args.rand_percent
         self.layer_idx = args.layer_idx
 
-        self.ALA = ALA(self.id, self.loss, train_data, self.batch_size, 
+        self.ALA = ALA(self.id, self.loss, self.train_data, self.batch_size, 
                     self.rand_percent, self.layer_idx, self.eta, self.device)
 
     def train(self):

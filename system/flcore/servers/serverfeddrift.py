@@ -97,19 +97,8 @@ class FedDrift(Server):
             # 定期评估
             if i % self.eval_gap == 0:
                 print(f"\n--- 第 {i} 轮评估 ---")
-                stats = self.evaluate(current_round=i) # Pass current_round
+                self.evaluate(current_round=i) # Pass current_round
                 
-                # 记录和输出性能 (serverbase evaluate already logs to wandb if self.args.wandb is true)
-                self.rs_test_acc.append(stats['acc'])
-                self.rs_train_loss.append(stats['loss'])
-                
-                print(f"平均测试准确率: {stats['acc']:.4f}")
-                print(f"平均训练损失: {stats['loss']:.4f}")
-                print(f"集群数量: {unique_clusters}") # This unique_clusters is from selected clients, evaluate logs len(self.global_models)
-                
-                # 如果需要，可视化集群分布
-                if hasattr(self.args, 'visualize_clusters') and self.args.visualize_clusters:
-                    self.visualize_clustering(i) # Pass current_round
             
             # 计算耗时
             e_t = time.time()

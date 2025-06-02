@@ -102,7 +102,6 @@ def run(args):
                     entity=args.wandb_entity,
                     name=run_name,
                     config=wandb_config,
-                    reinit=True,
                     settings=wandb.Settings(
                         start_method="thread",
                         anonymous="never"  # Explicitly set anonymous policy
@@ -630,7 +629,7 @@ if __name__ == "__main__":
 
     # Weights & Biases arguments
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
-    parser.add_argument('--wandb_project', type=str, default="FedDCA", help='Wandb project name')
+    parser.add_argument('--wandb_project', type=str, default="FedPCA", help='Wandb project name')
     parser.add_argument('--wandb_entity', type=str, default="Gerid", help='Wandb entity (username or team)') # User should set this
     parser.add_argument('--wandb_api_key', type=str, default="47b2a9d806ce037a46ec07b05d6f211af19728a3",
                         help='Wandb API key (optional, can be set as env var)')
