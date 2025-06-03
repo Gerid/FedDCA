@@ -618,8 +618,7 @@ if __name__ == "__main__":
     parser.add_argument('-vi', "--vis_interval", type=int, default=10,
                        help="聚类可视化的轮次间隔")
     parser.add_argument('-vb', "--verbose", type=bool, default=True, # This was a bool, action='store_true' is better for flags
-                       help="是否输出详细信息")
-    # 概念漂移数据集参数
+                       help="是否输出详细信息")    # 概念漂移数据集参数
     parser.add_argument('--use_drift_dataset', action='store_true', 
                         help='使用概念漂移数据集')
 
@@ -629,6 +628,8 @@ if __name__ == "__main__":
                         help='概念漂移数据集目录')
     parser.add_argument('--max_iterations', type=int, default=200, 
                         help='概念漂移数据集的最大迭代数')
+    parser.add_argument('--drift_round', type=int, default=100,
+                        help='概念漂移发生的轮次，默认为第100轮')
                         
     # Flash算法特有参数
     parser.add_argument('--loss_decrement', type=float, default=0.01,

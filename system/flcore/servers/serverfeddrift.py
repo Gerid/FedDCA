@@ -40,20 +40,14 @@ class FedDrift(Server):
         for i in range(self.global_rounds + 1):
             s_t = time.time()
             self.current_round = i # Store current round
-            
-            # 每轮选择客户端
+              # 每轮选择客户端
             self.selected_clients = self.select_clients()
+            
+            # Apply concept drift transformation if needed
+            self.apply_drift_transformation()
             
             # 每个客户端进行集群分配
             for client in self.selected_clients:
-                if i == 100:  # Condition for drift
-                    if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
-                        if hasattr(client, 'apply_drift_transformation'):
-                            print(f"Server: Applying drift for client {client.id} at round {i}")
-                            # Apply drift to both training and testing datasets on the client
-                            client.apply_drift_transformation()
-                        else:
-                            print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
 
                 client.clustering(self.global_models)
             

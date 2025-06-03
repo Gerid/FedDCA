@@ -461,7 +461,9 @@ class Server(object):
         return ids, num_samples, tot_correct, tot_auc
 
     def apply_drift_transformation(self):
-        if self.current_round == 100:  # Condition for drift
+        """统一的概念漂移应用方法，由参数控制漂移时间点"""
+        drift_round = getattr(self.args, 'drift_round', 100)  # 默认第100轮
+        if self.current_round == drift_round:  # 使用配置的漂移轮次
             for client in self.selected_clients:
                 if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
                     if hasattr(client, 'apply_drift_transformation'):

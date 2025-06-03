@@ -620,13 +620,15 @@ class FedDCA(Server):
             if not self.selected_clients:
                 print(f"Round {i}: No clients selected. Skipping round.")
                 self.Budget.append(time.time() - s_t)
-                continue
-
-            # 1. Clients perform local training
+                continue            # 1. Clients perform local training
             if self.args.verbose:
                 print(f"Round {i}: Starting local training for {len(self.selected_clients)} clients.")
+            
+            # Apply concept drift transformation if needed
+            self.apply_drift_transformation()
+            
             for client in self.selected_clients:
-                client.train() 
+                client.train()
             if self.args.verbose:
                 print(f"Round {i}: Local training completed.")
 
