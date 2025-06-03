@@ -26,7 +26,8 @@ def generate_agnews(dir_path, num_clients, num_classes, niid, balance, partition
     train_path = dir_path + "train/"
     test_path = dir_path + "test/"
 
-    if check(config_path, train_path, test_path, num_clients, num_classes, niid, balance, partition):
+    if check(config_path, train_path, test_path, num_clients, niid, balance, partition):
+    #if check(config_path, train_path, test_path, num_clients, num_classes, niid, balance, partition):
         return
 
     # Get AG_News data
