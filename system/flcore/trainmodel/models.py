@@ -44,12 +44,17 @@ class HARCNN(nn.Module):
             nn.Linear(512, num_classes)
         )
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         out = self.conv1(x)
         out = self.conv2(out)
         out = torch.flatten(out, 1)
+        feature = out  # Use flattened conv features as the feature representation
         out = self.fc(out)
-        return out
+        
+        if return_features:
+            return out, feature
+        else:
+            return out
 
 
 # https://github.com/FengHZ/KD3A/blob/master/model/digit5.py
@@ -80,13 +85,17 @@ class Digit5CNN(nn.Module):
 
         self.fc = nn.Linear(2048, 10)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         batch_size = x.size(0)
-        feature = self.encoder(x)
-        feature = feature.view(batch_size, -1)
-        feature = self.linear(feature)
+        encoded_feature = self.encoder(x)
+        encoded_feature = encoded_feature.view(batch_size, -1)
+        feature = self.linear(encoded_feature)
         out = self.fc(feature)
-        return out
+        
+        if return_features:
+            return out, feature
+        else:
+            return out
         
 
 # https://github.com/FengHZ/KD3A/blob/master/model/amazon.py
@@ -106,10 +115,14 @@ class AmazonMLP(nn.Module):
         )
         self.fc = nn.Linear(100, 2)
 
-    def forward(self, x):
-        out = self.encoder(x)
-        out = self.fc(out)
-        return out
+    def forward(self, x, return_features=False):
+        feature = self.encoder(x)
+        out = self.fc(feature)
+        
+        if return_features:
+            return out, feature
+        else:
+            return out
         
 
 # # https://github.com/katsura-jp/fedavg.pytorch/blob/master/src/models/cnn.py
@@ -195,12 +208,16 @@ class FedAvgMLP(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, num_classes)
         self.act = nn.ReLU(inplace=True)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         if x.ndim == 4:
             x = x.view(x.size(0), -1)
-        x = self.act(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        feature = self.act(self.fc1(x))
+        x = self.fc2(feature)
+        
+        if return_features:
+            return x, feature
+        else:
+            return x
 
 # ====================================================================================================================
 
@@ -214,7 +231,7 @@ class Net(nn.Module):
         self.fc1 = nn.Linear(18432, 128)
         self.fc = nn.Linear(128, 10)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.conv1(x)
         x = nn.ReLU()(x)
         x = nn.MaxPool2d(2, 1)(x)
@@ -224,24 +241,32 @@ class Net(nn.Module):
         x = nn.MaxPool2d(2, 1)(x)
         x = self.dropout2(x)
         x = torch.flatten(x, 1)
-        x = self.fc1(x)
-        x = nn.ReLU()(x)
-        x = self.fc(x)
+        feature = self.fc1(x)
+        feature = nn.ReLU()(feature)
+        x = self.fc(feature)
         output = F.log_softmax(x, dim=1)
-        return output
+        
+        if return_features:
+            return output, feature
+        else:
+            return output
 
 # ====================================================================================================================
 
 class Mclr_Logistic(nn.Module):
     def __init__(self, input_dim=1*28*28, num_classes=10):
         super(Mclr_Logistic, self).__init__()
-        self.fc = nn.Linear(input_dim, num_classes)
+        self.fc = nn.Linear(input_dim, num_classes)    
 
-    def forward(self, x):
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
+    def forward(self, x, return_features=False):
+        feature = torch.flatten(x, 1)
+        x = self.fc(feature)
         output = F.log_softmax(x, dim=1)
-        return output
+        
+        if return_features:
+            return output, feature
+        else:
+            return output
 
 # ====================================================================================================================
 
@@ -249,14 +274,18 @@ class DNN(nn.Module):
     def __init__(self, input_dim=1*28*28, mid_dim=100, num_classes=10):
         super(DNN, self).__init__()
         self.fc1 = nn.Linear(input_dim, mid_dim)
-        self.fc = nn.Linear(mid_dim, num_classes)
+        self.fc = nn.Linear(mid_dim, num_classes)    
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        x = self.fc(x)
+        feature = F.relu(self.fc1(x))
+        x = self.fc(feature)
         x = F.log_softmax(x, dim=1)
-        return x
+        
+        if return_features:
+            return x, feature
+        else:
+            return x
 
 # ====================================================================================================================
 
@@ -268,17 +297,21 @@ class CifarNet(nn.Module):
         self.conv2 = nn.Conv2d(6, batch_size, 5)
         self.fc1 = nn.Linear(batch_size * 5 * 5, 120)
         self.fc2 = nn.Linear(120, 84)
-        self.fc = nn.Linear(84, num_classes)
+        self.fc = nn.Linear(84, num_classes)    
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.pool(F.relu(self.conv1(x)))
         x = self.pool(F.relu(self.conv2(x)))
         x = x.view(-1, batch_size * 5 * 5)
         x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc(x)
+        feature = F.relu(self.fc2(x))
+        x = self.fc(feature)
         x = F.log_softmax(x, dim=1)
-        return x
+        
+        if return_features:
+            return x, feature
+        else:
+            return x
 
 # ====================================================================================================================
 
@@ -356,17 +389,21 @@ class LeNet(nn.Module):
         self.fc = nn.Linear(bottleneck_dim, num_classes)
         if iswn == "wn":
             self.fc = nn.utils.weight_norm(self.fc, name="weight")
-        self.fc.apply(init_weights)
+        self.fc.apply(init_weights)    
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         x = self.conv_params(x)
         x = x.view(x.size(0), -1)
         x = self.bottleneck(x)
-        x = self.bn(x)
-        x = self.dropout(x)
-        x = self.fc(x)
+        feature = self.bn(x)
+        feature = self.dropout(feature)
+        x = self.fc(feature)
         x = F.log_softmax(x, dim=1)
-        return x
+        
+        if return_features:
+            return x, feature
+        else:
+            return x
 
 # ====================================================================================================================
 
@@ -413,9 +450,9 @@ class LSTMNet(nn.Module):
                             dropout=dropout, 
                             batch_first=True)
         dims = hidden_dim*2 if bidirectional else hidden_dim
-        self.fc = nn.Linear(dims, num_classes)
+        self.fc = nn.Linear(dims, num_classes)    
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         text, text_lengths = x
         
         embedded = self.embedding(text)
@@ -427,12 +464,15 @@ class LSTMNet(nn.Module):
         #unpack sequence
         out, out_lengths = nn.utils.rnn.pad_packed_sequence(packed_output, batch_first=True)
 
-        out = torch.relu_(out[:,-1,:])
-        out = self.dropout(out)
-        out = self.fc(out)
+        feature = torch.relu_(out[:,-1,:])
+        feature = self.dropout(feature)
+        out = self.fc(feature)
         out = F.log_softmax(out, dim=1)
-            
-        return out
+        
+        if return_features:
+            return out, feature
+        else:
+            return out
 
 # ====================================================================================================================
 
@@ -448,16 +488,18 @@ class fastText(nn.Module):
         
         # Output Layer
         self.fc = nn.Linear(hidden_dim, num_classes)
-        
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         text, text_lengths = x
 
         embedded_sent = self.embedding(text)
-        h = self.fc1(embedded_sent.mean(1))
-        z = self.fc(h)
+        feature = self.fc1(embedded_sent.mean(1))
+        z = self.fc(feature)
         out = F.log_softmax(z, dim=1)
 
-        return out
+        if return_features:
+            return out, feature
+        else:
+            return out
 
 # ====================================================================================================================
 
@@ -491,8 +533,8 @@ class TextCNN(nn.Module):
         
         # Fully-Connected Layer
         self.fc = nn.Linear(num_channels*len(kernel_size), num_classes)
-        
-    def forward(self, x):
+
+    def forward(self, x, return_features=False):
         text, text_lengths = x
 
         embedded_sent = self.embedding(text).permute(0,2,1)
@@ -502,11 +544,14 @@ class TextCNN(nn.Module):
         conv_out3 = self.conv3(embedded_sent).squeeze(2)
         
         all_out = torch.cat((conv_out1, conv_out2, conv_out3), 1)
-        final_feature_map = self.dropout(all_out)
-        out = self.fc(final_feature_map)
+        feature = self.dropout(all_out)
+        out = self.fc(feature)
         out = F.log_softmax(out, dim=1)
 
-        return out
+        if return_features:
+            return out, feature
+        else:
+            return out
 
 # ====================================================================================================================
 
