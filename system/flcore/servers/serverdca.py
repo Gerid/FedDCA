@@ -130,52 +130,7 @@ def perform_label_conditional_clustering(clients, num_clusters, device, verbose=
         print(f"标签条件聚类失败: {e}")
         return {}
 
-def plot_metrics(train_loss_list=None, test_acc_list=None):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            # 创建存储指标的列表
-            if not hasattr(self, 'train_loss_history'):
-                self.train_loss_history = []
-            if not hasattr(self, 'test_acc_history'):
-                self.test_acc_history = []
-            
-            # 执行原函数
-            result = func(self, *args, **kwargs)
-            
-            # 绘制训练过程图
-            plt.figure(figsize=(12, 5))
-            
-            # Plot training loss
-            plt.subplot(121)
-            plt.plot(self.rs_train_loss, 'r-', label='Training Loss')
-            plt.title('Training Loss vs. Rounds')
-            plt.xlabel('Round')
-            plt.ylabel('Loss')
-            plt.legend()
-            plt.grid(True)
-            
-            # Plot test accuracy
-            plt.subplot(122)
-            plt.plot(self.rs_test_acc, 'b-', label='Test Accuracy')
-            plt.title('Test Accuracy vs. Rounds')
-            plt.xlabel('Round')
-            plt.ylabel('Accuracy')
-            plt.legend()
-            plt.grid(True)
-            
-            plt.tight_layout()
-            
-            # 保存图片
-            save_path = os.path.join('results', f'training_metrics_{time.strftime("%Y%m%d-%H%M%S")}.png')
-            if not os.path.exists('results'):
-                os.makedirs('results')
-            plt.savefig(save_path)
-            plt.close()
-            
-            return result
-        return wrapper
-    return decorator
+
 
 class FedDCA(Server):    
     def __init__(self, args, times):
@@ -622,8 +577,8 @@ class FedDCA(Server):
                     wandb.log({
                         "cluster_performance/overall_accuracy": overall_avg_acc,
                         "cluster_performance/num_clusters": len(cluster_stats),
-                        "round": current_round
-                    })
+
+                    }, step=self.current_round)
                     
         except Exception as e:
             print(f"Error in evaluate_cluster_performance: {str(e)}")
@@ -648,13 +603,12 @@ class FedDCA(Server):
                 wandb.log({
                     "cluster_assignments/num_clusters": len(cluster_distribution),
                     **cluster_sizes,
-                    "round": current_round
-                })
+                }, step=self.current_round)
                 
         except Exception as e:
             print(f"Error in log_cluster_assignments: {str(e)}")
 
-    @plot_metrics()
+    #@plot_metrics()
     def train(self):
         for i in range(self.global_rounds + 1):
             s_t = time.time()

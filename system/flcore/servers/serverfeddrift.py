@@ -111,8 +111,7 @@ class FedDrift(Server):
         
         # 最终评估和输出
         print("\n训练完成!")
-        stats = self.evaluate(current_round=self.global_rounds) # Pass final round
-        print(f"最终平均测试准确率: {stats['acc']:.4f}")
+        # self.evaluate(current_round=self.global_rounds) # Pass final round
         print(f"集群演变: {self.cluster_counts}")
         
         # 输出耗时统计

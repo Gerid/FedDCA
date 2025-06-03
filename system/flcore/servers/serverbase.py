@@ -331,7 +331,7 @@ class Server(object):
         print("Std Test Accurancy: {:.4f}".format(std_test_acc))
         print("Std Test AUC: {:.4f}".format(std_test_auc))
 
-        if self.args.use_wandb and wandb.run is not None:
+        if wandb.run is not None:
             try:
                 wandb.log({
                     "Global Train Loss": train_loss,
