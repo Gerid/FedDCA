@@ -658,6 +658,7 @@ class FedDCA(Server):
     def train(self):
         for i in range(self.global_rounds + 1):
             s_t = time.time()
+            self.current_round = i
             if self.args.verbose:
                 print(f"\n FedDCA Round {i} Starting...")
 
