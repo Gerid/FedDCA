@@ -352,12 +352,22 @@ def run(args):
         elif args.algorithm == "FedDCA":
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
-            args.model = BaseHeadSplit(args.model, args.head)
+            args.model = BaseHeadSplit(args.model, args.head) # model is now BaseHeadSplit
             server = FedDCA(args, i)
-            # Determine and set classifier keys for split model (representation/classifier)
-            clf_keys = list(args.model.state_dict().keys())[-2:]
-            server.set_clf_keys(clf_keys)
 
+            # Determine classifier keys from the 'head' part of BaseHeadSplit
+            clf_keys = []
+            if hasattr(args.model, 'head') and args.model.head is not None:
+                for key, _ in args.model.head.named_parameters():
+                    # Parameters in the state_dict of the full model (args.model)
+                    # are prefixed with 'head.' if head is an nn.Module attribute of BaseHeadSplit.
+                    clf_keys.append('head.' + key)
+            
+            if not clf_keys:
+                raise ValueError("Classifier keys (clf_keys) could not be determined for FedDCA. Ensure model.head is properly defined in BaseHeadSplit and has parameters.")
+
+            server.set_clf_keys(clf_keys) # Add this method to FedDCA server
+            
         elif args.algorithm == "FedIFCA":
             args.head = copy.deepcopy(args.model.fc)            
             args.model.fc = nn.Identity()
@@ -689,7 +699,7 @@ if __name__ == "__main__":
     # Override with command-line arguments if they were changed from their defaults
     # This is implicitly handled because argparse already parsed them into args.
     # If a command-line arg was given, it's already in 'args' and won't be overwritten by YAML
-    # unless the YAML loading logic above is changed to always prefer YAML
+    # unless the YAML loading logic above is changed to always prefer YAML.
     # The current logic: YAML sets if argparse is default. If argparse is not default, it stays.
 
     # wandb specific args from YAML (if not overridden by command line)

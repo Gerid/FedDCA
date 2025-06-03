@@ -29,7 +29,7 @@
                 "-m",
                 "cnn",
                 "-algo",
-                "FedALA",
+                "FedDCA",
                 "-gr",
                 "200",
                 "-ls",
