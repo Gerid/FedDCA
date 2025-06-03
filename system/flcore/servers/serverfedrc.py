@@ -73,6 +73,8 @@ class serverFedRC(Server):
                 print("Evaluate global model")
                 self.evaluate() # Evaluate global model (or cluster models)
 
+            self.apply_drift_transformation()
+
             # Update cluster assignments periodically
             if i > 0 and self.num_clusters > 1: # Only cluster if more than 1 cluster
                 self.update_client_cluster_assignments()
@@ -81,15 +83,6 @@ class serverFedRC(Server):
             self.send_cluster_models()
             
             for client in self.selected_clients:
-                if i == 100:  # Condition for drift
-                    if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
-                        if hasattr(client, 'apply_drift_transformation'):
-                            print(f"Server: Applying drift for client {client.id} at round {i}")
-                            # Apply drift to both training and testing datasets on the client
-                            client.apply_drift_transformation()
-                        else:
-                            print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
-
                 client.train()
 
             self.receive_models() # Receives models from clients

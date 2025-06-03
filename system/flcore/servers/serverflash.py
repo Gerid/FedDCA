@@ -49,6 +49,7 @@ class Flash(Server):
             
             # 每轮选择客户端
             self.selected_clients = self.select_clients()
+            self.apply_drift_transformation()
             
             # 向选定客户端发送模型
             self.send_parameters(self.selected_clients)
