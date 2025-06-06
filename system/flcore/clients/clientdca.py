@@ -5,7 +5,7 @@ import numpy as np
 import time
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
-from ..clients.clientbase import Client
+from .clientbase import Client
 from utils.data_utils import read_client_data
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
@@ -63,7 +63,12 @@ class clientDCA(Client):
             self.drift_threshold = 0.1
             self.drift_detection_enabled = True
             
-            self.clf_keys = [] # Will be set by the server if needed, or can be derived if model structure is fixed
+            self.clf_keys = []  # Will be set by the server if needed, or can be derived if model structure is fixed
+            
+            # 添加特征分布跟踪属性
+            self.current_round_features = {}  # 当前轮次的标签条件特征分布
+            self.previous_round_features = {}  # 上一轮次的标签条件特征分布
+            self.feature_history = {}  # 特征分布历史记录
 
         except AttributeError as e:
             print(f"Error initializing client {id}: Missing required attribute - {str(e)}")
@@ -80,45 +85,102 @@ class clientDCA(Client):
         self.clf_keys = clf_keys
 
     def get_rep_parameters_vector(self):
-        """获取表示层 (body) 的参数，并将其转换为向量。"""
-        if hasattr(self.model, 'body') and self.model.body is not None:
-            rep_params = [param.clone().detach() for param in self.model.body.parameters()]
-            if not rep_params:
-                # print(f"Client {self.id}: Representation part (body) has no parameters.")
-                return torch.tensor([], device=self.device) # Return empty tensor if no params
-            return parameters_to_vector(rep_params)
-        else:
-            # print(f"Client {self.id}: Model has no 'body' attribute for representation parameters.")
-            # Fallback or error handling: if the whole model is the representation layer
-            # This case needs careful consideration based on your model structure.
-            # For now, assume 'body' must exist.
-            # As a simple fallback, consider all non-classifier keys as representation if clf_keys are set
-            if self.clf_keys: # if clf_keys are set, we can try to infer rep_keys
-                all_params = dict(self.model.named_parameters())
-                rep_params_list = []
-                for name, param in all_params.items():
-                    is_clf_key = False
-                    for clf_key_pattern in self.clf_keys:
-                        if name.startswith(clf_key_pattern): # e.g. clf_key_pattern could be 'head.'
-                            is_clf_key = True
-                            break
-                    if not is_clf_key:
-                        rep_params_list.append(param.clone().detach())
+        """
+        获取特征提取器的输出特征表征 (类似FedCCFA的local proto)
+        而不是表示层的参数向量
+        
+        返回:
+            聚合后的特征表征向量，形状为 [feature_dim]
+        """
+        try:
+            # 存储所有样本的特征表征
+            all_features = []
+            
+            # 注册临时钩子来捕获特征
+            hook_handle = None
+            temp_outputs = []
+            
+            def temp_hook(module, input, output):
+                temp_outputs.append(output.detach())
+            
+            # 尝试找到适合的特征层
+            feature_layer = None
+            if hasattr(self.model, 'base'):
+                feature_layer = self.model.base
+            elif hasattr(self.model, 'body'):
+                feature_layer = self.model.body
+            elif hasattr(self.model, 'features'):
+                feature_layer = self.model.features
+            elif hasattr(self.model, 'encoder'):
+                feature_layer = self.model.encoder
+            
+            if feature_layer is None:
+                print(f"Warning: Client {self.id} - 无法找到适合的特征层")
+                return torch.tensor([], device=self.device)
                 
-                if not rep_params_list:
-                    # print(f"Client {self.id}: No representation parameters found after excluding clf_keys.")
-                    return torch.tensor([], device=self.device)
-                return parameters_to_vector(rep_params_list)
-            else:
-                # print(f"Client {self.id}: Model has no 'body' and clf_keys are not set. Cannot determine representation parameters.")
-                # Fallback: return all model parameters if no body and no clf_keys
-                # This might be incorrect if there is an implicit classifier part not in clf_keys
-                # For safety, returning empty or raising error might be better if strict separation is always expected.
-                # all_model_params = [param.clone().detach() for param in self.model.parameters()]
-                # if not all_model_params:
-                #     return torch.tensor([], device=self.device)
-                # return parameters_to_vector(all_model_params)
-                return torch.tensor([], device=self.device) # Safest to return empty if structure is ambiguous
+            hook_handle = feature_layer.register_forward_hook(temp_hook)
+            
+            # 加载训练数据进行特征提取
+            loader = self.load_train_data()
+            
+            # 限制处理的批次数以提高效率
+            max_batches = 5  # 使用较少的批次进行特征提取
+            batch_count = 0
+            
+            self.model.eval()  # 设置为评估模式
+            with torch.no_grad():
+                for x, y in loader:
+                    batch_count += 1
+                    if batch_count > max_batches:
+                        break
+                        
+                    # 确保数据在正确的设备上
+                    if isinstance(x, list):
+                        x = [item.to(self.device) for item in x]
+                    else:
+                        x = x.to(self.device)
+                    
+                    # 前向传播，触发钩子函数
+                    _ = self.model(x)
+                    
+                    # 获取最近生成的特征
+                    if temp_outputs:
+                        features = temp_outputs[-1]
+                        
+                        # 处理不同维度的特征输出
+                        if features.dim() > 2:  # 如果是卷积特征 [batch, channels, height, width]
+                            # 全局平均池化
+                            features = features.mean(dim=tuple(range(2, features.dim())))
+                        
+                        # 收集所有样本的特征
+                        all_features.append(features.cpu())
+                        
+                        # 清空临时输出列表
+                        temp_outputs.clear()
+            
+            # 移除钩子
+            if hook_handle:
+                hook_handle.remove()
+                
+            # 如果没有收集到特征，返回空张量
+            if not all_features:
+                print(f"Warning: Client {self.id} - 没有收集到任何特征")
+                return torch.tensor([], device=self.device)
+            
+            # 拼接所有特征并计算平均特征表征
+            stacked_features = torch.cat(all_features, dim=0)  # [total_samples, feature_dim]
+            mean_features = stacked_features.mean(dim=0)  # [feature_dim]
+            
+            return mean_features.to(self.device)
+            
+        except Exception as e:
+            print(f"Error in get_rep_parameters_vector for client {self.id}: {str(e)}")
+            
+            # 移除钩子
+            if 'hook_handle' in locals() and hook_handle:
+                hook_handle.remove()
+                
+            return torch.tensor([], device=self.device)
 
     def get_clf_parameters(self):
         """获取分类器 (head) 的参数 state_dict。"""
@@ -142,7 +204,7 @@ class clientDCA(Client):
                             if key_pattern == "head." and name.startswith("head."):
                                 adjusted_key = name[len("head."):]
                             else:
-                                adjusted_key = name # Or handle other patterns
+                                adjusted_key = name  # Or handle other patterns
                             clf_state_dict[adjusted_key] = param.clone().detach()
                 if not clf_state_dict:
                     # print(f"Client {self.id}: No classifier parameters found using clf_keys.")
@@ -150,7 +212,7 @@ class clientDCA(Client):
                 return clf_state_dict
             else:
                 # print(f"Client {self.id}: Model has no 'head' and clf_keys are not set. Cannot determine classifier parameters.")
-                return None # Or an empty dict {} if that's preferred for missing classifiers
+                return None  # Or an empty dict {} if that's preferred for missing classifiers
 
     def receive_cluster_model(self, cluster_model_head_state_dict):
         """用集群的分类器头参数初始化本地模型的头部。表示层 (body) 不变。"""
@@ -176,12 +238,12 @@ class clientDCA(Client):
                         sanitized_state_dict[key] = param_val.clone().to(self.device)
                     else:
                         # print(f"Client {self.id}: Shape mismatch for key '{key}' in head. Expected {current_head_state_dict[key].shape}, got {param_val.shape}. Skipping this key.")
-                        sanitized_state_dict[key] = current_head_state_dict[key] # Keep original param
+                        sanitized_state_dict[key] = current_head_state_dict[key]  # Keep original param
                 else:
-                    pass # print(f"Client {self.id}: Key '{key}' from cluster model not found in local model head. Skipping this key.")
+                    pass  # print(f"Client {self.id}: Key '{key}' from cluster model not found in local model head. Skipping this key.")
             
             # Load only the matching and shape-compatible keys
-            self.model.head.load_state_dict(sanitized_state_dict, strict=False) # strict=False to allow partial loads
+            self.model.head.load_state_dict(sanitized_state_dict, strict=False)  # strict=False to allow partial loads
             # print(f"Client {self.id}: Loaded cluster model (head) parameters.")
 
         except (RuntimeError, ValueError) as e:
@@ -352,6 +414,66 @@ class clientDCA(Client):
                 hook_handle.remove()
                 
             return {}
+
+    def update_feature_distributions(self, current_round):
+        """
+        更新特征分布跟踪
+        在每轮通信前调用，用于跟踪特征分布的变化
+        """
+        try:
+            # 将当前轮次的特征存储为上一轮的特征
+            self.previous_round_features = copy.deepcopy(self.current_round_features)
+            
+            # 获取当前轮次的特征分布
+            self.current_round_features = self.get_intermediate_outputs_with_labels()
+            
+            # 存储到历史记录中
+            if current_round not in self.feature_history:
+                self.feature_history[current_round] = {}
+                
+            self.feature_history[current_round] = copy.deepcopy(self.current_round_features)
+            
+            # 可选：限制历史记录的长度以节省内存
+            max_history_length = 10  # 保持最近10轮的特征分布
+            if len(self.feature_history) > max_history_length:
+                oldest_round = min(self.feature_history.keys())
+                del self.feature_history[oldest_round]
+                
+        except Exception as e:
+            print(f"Error updating feature distributions for client {self.id}: {str(e)}")
+
+    def get_feature_distribution_stats(self):
+        """
+        获取特征分布统计信息
+        返回当前轮次和上一轮次的特征分布对比
+        """
+        stats = {}
+        
+        try:
+            if self.current_round_features:
+                stats['current_round'] = {}
+                for label, features in self.current_round_features.items():
+                    if len(features) > 0:
+                        stats['current_round'][label] = {
+                            'count': len(features),
+                            'mean': features.mean(dim=0),
+                            'std': features.std(dim=0) if len(features) > 1 else torch.zeros_like(features.mean(dim=0))
+                        }
+            
+            if self.previous_round_features:
+                stats['previous_round'] = {}
+                for label, features in self.previous_round_features.items():
+                    if len(features) > 0:
+                        stats['previous_round'][label] = {
+                            'count': len(features),
+                            'mean': features.mean(dim=0),
+                            'std': features.std(dim=0) if len(features) > 1 else torch.zeros_like(features.mean(dim=0))
+                        }
+        
+        except Exception as e:
+            print(f"Error getting feature distribution stats for client {self.id}: {str(e)}")
+            
+        return stats
 
     def train(self):
         trainloader = self.load_train_data()

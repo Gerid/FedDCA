@@ -580,7 +580,7 @@ if __name__ == "__main__":
     parser.add_argument('-ncs', "--num_clusters", type=int, default=5)
     parser.add_argument('-st', "--split_threshold", type=float, default=0.3)
     parser.add_argument('-mt', "--merge_threshold", type=float, default=0.05)
-    parser.add_argument('-ks', "--kde_samples", type=int, default=100)
+    parser.add_argument('-gs', "--gmm_samples", type=int, default=100)
     parser.add_argument('-cm', "--clustering_method", type=str, default="enhanced_label",
                         choices=["vwc", "label_conditional", "enhanced_label"],
                        help="聚类方法: vwc (原始变分Wasserstein聚类) 或 label_conditional (基于标签的条件Wasserstein聚类)")

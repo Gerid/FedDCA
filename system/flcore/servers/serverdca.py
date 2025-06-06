@@ -18,6 +18,8 @@ except ImportError:
     
 import matplotlib.pyplot as plt
 from sklearn.metrics import silhouette_score
+from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA
 from functools import wraps
 import wandb # Added wandb import
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
@@ -442,21 +444,20 @@ class FedDCA(Server):
                 
         except Exception as e:
             print(f"增强标签条件聚类失败: {str(e)}")
-            
-            # 确保每个客户端至少被分配到默认集群
+              # 确保每个客户端至少被分配到默认集群
             for client in self.selected_clients:
                 if client.id not in self.clusters:
                     self.clusters[client.id] = 0
-                    
+                
                 # 更新历史记录
                 if client.id not in self.client_cluster_history:
                     self.client_cluster_history[client.id] = []
                 self.client_cluster_history[client.id].append(0)
             
             return False
-
+    
     def collect_label_conditional_proxy_data(self):
-        """收集每个客户端按标签条件分组的代理数据"""
+        """收集每个客户端按标签条件分组的代理数据，使用GMM生成代理数据点"""
         label_conditional_proxy_data = {}
         
         for client in self.selected_clients:
@@ -484,25 +485,20 @@ class FedDCA(Server):
                     # 跳过空的特征集
                     if features.size == 0 or features.shape[0] == 0:
                         continue
-                    
-                    # 处理一维数据
+                      # 处理一维数据
                     if features.ndim == 1:
                         features = features.reshape(-1, 1)
                         
-                    # 如果样本数足够，使用KDE估计分布
+                    # 如果样本数足够，使用GMM估计分布
                     if features.shape[0] >= 5:  
                         try:
-                            # 转置特征以适应stats.gaussian_kde的输入格式
-                            kde = stats.gaussian_kde(features.T)
-                            
-                            # 采样点的数量
-                            num_samples = min(getattr(self.args, 'kde_samples', 20), max(20, features.shape[0]))
-                            
-                            # 重采样生成代理数据
-                            sampled = kde.resample(num_samples).T
+                            # 使用GMM生成代理数据
+                            num_samples = min(getattr(self.args, 'gmm_samples', 20), max(20, features.shape[0]))
+                            sampled = self.generate_proxy_data_gmm(features, num_samples)
                             label_conditional_proxy_data[client.id][label] = sampled
-                        except Exception:
-                            # KDE失败，使用原始特征
+                        except Exception as e:
+                            print(f"GMM failed for client {client.id} label {label}: {str(e)}")
+                            # GMM失败，使用原始特征
                             label_conditional_proxy_data[client.id][label] = features
                     else:
                         # 如果样本太少，直接使用原始数据
@@ -728,3 +724,131 @@ class FedDCA(Server):
         """Sets the classifier keys for the server."""
         self.clf_keys = clf_keys
         print(f"Server clf_keys set to: {self.clf_keys}")
+        
+    def generate_proxy_data_gmm(self, features, num_samples=100, min_components=1, max_components=5):
+        """
+        使用高斯混合模型(GMM)生成代理数据点
+        
+        参数:
+            features: 原始特征数据，形状为(n_samples, n_features)
+            num_samples: 要生成的代理数据点数量
+            min_components: GMM的最小组件数
+            max_components: GMM的最大组件数
+            
+        返回:
+            生成的代理数据点，形状为(num_samples, n_features)
+        """
+        try:
+            # 确保输入数据格式正确
+            if isinstance(features, torch.Tensor):
+                features = features.detach().cpu().numpy()
+                
+            if features.ndim == 1:
+                features = features.reshape(-1, 1)
+                
+            # 获取样本数和特征维度
+            n_samples, n_dim = features.shape
+            
+            # 如果样本数太少，直接使用Bootstrap采样
+            if n_samples < 3:
+                print(f"样本数({n_samples})过少，使用Bootstrap采样")
+                indices = np.random.choice(n_samples, size=num_samples, replace=True)
+                return features[indices]
+            
+            # 如果维度大于样本数，需要先降维
+            if n_dim > n_samples:
+                print(f"维度({n_dim})大于样本数({n_samples})，使用PCA降维")
+                try:
+                    # 降维到样本数-1维度，但至少保留2维
+                    target_dim = max(2, min(n_samples - 1, 20))  # 限制最大降维到20维
+                    pca = PCA(n_components=target_dim)
+                    features_reduced = pca.fit_transform(features)
+                    
+                    # 在降维空间中使用GMM
+                    gmm_samples = self.gmm_sample(features_reduced, num_samples, min_components, max_components)
+                    
+                    # 投影回原始空间
+                    samples = pca.inverse_transform(gmm_samples)
+                    return samples
+                    
+                except Exception as e:
+                    print(f"PCA降维或GMM失败: {str(e)}")
+                    # 失败时使用原始特征的Bootstrap采样
+                    indices = np.random.choice(n_samples, size=num_samples, replace=True)
+                    return features[indices]
+            
+            # 正常情况：直接使用GMM
+            return self.gmm_sample(features, num_samples, min_components, max_components)
+            
+        except Exception as e:
+            print(f"GMM处理完全失败: {str(e)}")
+            
+            # 最后的回退：直接返回原始特征或其Bootstrap采样
+            if len(features) >= num_samples:
+                return features[:num_samples]
+            else:
+                indices = np.random.choice(len(features), size=num_samples, replace=True)
+                return features[indices]
+
+    def gmm_sample(self, features, num_samples, min_components=1, max_components=5):
+        """
+        使用GMM生成样本
+        
+        参数:
+            features: 特征数据
+            num_samples: 要生成的样本数量
+            min_components, max_components: GMM组件数范围
+        """
+        n_samples = features.shape[0]
+        
+        # 动态确定组件数量，但不超过样本数的一半
+        n_components = min(max_components, max(min_components, n_samples // 4))
+        
+        # 使用BIC准则选择最佳的组件数
+        best_gmm = None
+        best_bic = np.inf
+        
+        # 在合理范围内尝试不同的组件数
+        for n_comp in range(min_components, min(n_components + 1, n_samples // 2 + 1)):
+            try:
+                gmm = GaussianMixture(
+                    n_components=n_comp,
+                    covariance_type='full',  # 使用完全协方差矩阵以捕获特征间相关性
+                    random_state=42,
+                    reg_covar=1e-3  # 添加正则化以增加数值稳定性
+                )
+                gmm.fit(features)
+                bic = gmm.bic(features)
+                
+                if bic < best_bic:
+                    best_bic = bic
+                    best_gmm = gmm
+            except Exception as e:
+                print(f"GMM拟合失败(n_comp={n_comp}): {str(e)}")
+                continue
+        
+        # 如果所有组件数都失败，使用简单的单组件GMM
+        if best_gmm is None:
+            try:
+                best_gmm = GaussianMixture(
+                    n_components=1,
+                    covariance_type='diag',  # 使用对角协方差矩阵，更简单更稳定
+                    random_state=42,
+                    reg_covar=1e-2  # 更强的正则化
+                )
+                best_gmm.fit(features)
+            except Exception as e:
+                print(f"单组件GMM拟合失败: {str(e)}")
+                # 如果GMM完全失败，回退到Bootstrap
+                indices = np.random.choice(n_samples, size=num_samples, replace=True)
+                return features[indices]
+        
+        # 使用拟合好的GMM生成样本
+        try:
+            samples, _ = best_gmm.sample(num_samples)
+            return samples
+        except Exception as e:
+            print(f"GMM采样失败: {str(e)}")
+            # 采样失败时使用Bootstrap
+            indices = np.random.choice(n_samples, size=num_samples, replace=True)
+            return features[indices]

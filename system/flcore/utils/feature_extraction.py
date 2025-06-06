@@ -188,14 +188,14 @@ def generate_proxy_data_kde(features, num_samples=100):
         indices = np.random.choice(len(features), size=num_samples, replace=True)
         return features[indices]
 
-def collect_label_conditional_proxy_data(clients, method='gmm', kde_samples=100, min_components=1, max_components=5):
+def collect_label_conditional_proxy_data(clients, method='gmm', gmm_samples=100, min_components=1, max_components=5):
     """
     收集每个客户端按标签条件分组的代理数据
     
     参数:
         clients: 客户端列表
         method: 代理数据生成方法，'gmm'或'kde'
-        kde_samples: 要生成的样本数量
+        gmm_samples: 要生成的样本数量
         min_components, max_components: GMM组件数范围
         
     返回:
@@ -223,24 +223,23 @@ def collect_label_conditional_proxy_data(clients, method='gmm', kde_samples=100,
             # 跳过空的特征集
             if features.size == 0 or features.shape[0] == 0:
                 continue
-                
-            # 生成该标签的代理数据
+                  # 生成该标签的代理数据
             try:
                 if method == 'gmm':
                     # 使用GMM生成代理数据
                     sampled = generate_proxy_data_gmm(
                         features, 
-                        num_samples=kde_samples, 
+                        num_samples=gmm_samples, 
                         min_components=min_components, 
                         max_components=max_components
                     )
                 elif method == 'kde':
                     # 使用KDE生成代理数据
-                    sampled = generate_proxy_data_kde(features, num_samples=kde_samples)
+                    sampled = generate_proxy_data_kde(features, num_samples=gmm_samples)
                 else:
                     # 未知方法，使用GMM作为默认选择
                     print(f"未知的代理数据生成方法 '{method}'，使用GMM")
-                    sampled = generate_proxy_data_gmm(features, num_samples=kde_samples)
+                    sampled = generate_proxy_data_gmm(features, num_samples=gmm_samples)
                 
                 label_conditional_proxy_data[client.id][label] = sampled
                 

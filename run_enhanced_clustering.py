@@ -41,8 +41,8 @@ def run_enhanced_clustering():
                         help='聚类方法: vwc, label_conditional, enhanced_label')
     parser.add_argument('--num_clusters', type=int, default=5,
                         help='聚类数量')
-    parser.add_argument('--kde_samples', type=int, default=100,
-                        help='每个标签的KDE采样数量')
+    parser.add_argument('--gmm_samples', type=int, default=100,
+                        help='每个标签的GMM采样数量')
 
     # 概念漂移相关设置
     parser.add_argument('--use_drift_dataset', type=bool, default=True,
