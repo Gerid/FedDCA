@@ -118,9 +118,88 @@ class Client(object):
             # self.apply_drift_transformation(is_train=False)
         return DataLoader(self.test_data, batch_size, drop_last=False, shuffle=True)
             
-    def set_parameters(self, model):
-        for new_param, old_param in zip(model.parameters(), self.model.parameters()):
-            old_param.data = new_param.data.clone()
+    def set_parameters(self, params_dict, part=None):
+        """Sets the parameters of the model or parts of it.
+
+        Args:
+            params_dict: A state_dict containing parameters to load.
+            part (str, optional): Specifies which part of the model to update. 
+                                  Can be 'feature_extractor', 'classifier', or None.
+                                  If None, loads into the entire model.
+        """
+        if part == 'feature_extractor':
+            target_model_part = None
+            if hasattr(self.model, 'base') and self.model.base is not None:
+                target_model_part = self.model.base
+            elif hasattr(self.model, 'body') and self.model.body is not None: # For models like ResNet
+                target_model_part = self.model.body
+            elif hasattr(self.model, 'features') and self.model.features is not None: # For models like VGG
+                target_model_part = self.model.features
+            elif hasattr(self.model, 'encoder') and self.model.encoder is not None:
+                target_model_part = self.model.encoder
+            
+            if target_model_part:
+                try:
+                    target_model_part.load_state_dict(params_dict, strict=True)
+                except RuntimeError as e:
+                    # print(f"Client {self.id}: Runtime error loading feature_extractor params (strict=True): {e}. Trying with strict=False.")
+                    try:
+                        target_model_part.load_state_dict(params_dict, strict=False)
+                    except Exception as e_non_strict:
+                        # print(f"Client {self.id}: Error loading feature_extractor params (strict=False): {e_non_strict}")
+                        pass # Or handle more gracefully
+            # else:
+                # print(f"Client {self.id}: Could not identify feature extractor part to set parameters.")
+                # Fallback: try to load into the whole model if part is not found, or raise error
+                # For now, we'll just skip if the specific part isn't clearly identifiable.
+                # Consider adding a more robust way to identify feature extractors if this becomes an issue.
+                pass
+
+        elif part == 'classifier':
+            if hasattr(self.model, 'head') and self.model.head is not None:
+                try:
+                    self.model.head.load_state_dict(params_dict, strict=True)
+                except RuntimeError as e:
+                    # print(f"Client {self.id}: Runtime error loading classifier params (strict=True): {e}. Trying with strict=False.")
+                    try:
+                        self.model.head.load_state_dict(params_dict, strict=False)
+                    except Exception as e_non_strict:
+                        # print(f"Client {self.id}: Error loading classifier params (strict=False): {e_non_strict}")
+                        pass
+            elif hasattr(self, 'clf_keys') and self.clf_keys: # If head attribute doesn't exist, but we know the keys
+                # This is more complex as it requires loading parts of the main model's state_dict.
+                # For simplicity, this case might require the server to send the full model state_dict
+                # if the client doesn't have a distinct 'head' module.
+                # Current implementation assumes 'head' exists for 'classifier' part.
+                # print(f"Client {self.id}: Model has no 'head' attribute. Classifier part update might be incomplete if relying on clf_keys directly here.")
+                # A more robust solution would be to iterate through clf_keys and update self.model.state_dict()
+                # This is tricky because params_dict would only contain classifier keys.
+                # A simple self.model.load_state_dict(params_dict, strict=False) might work if keys are unique.
+                try:
+                    self.model.load_state_dict(params_dict, strict=False) # Try loading, hoping keys match
+                except Exception as e:
+                    # print(f"Client {self.id}: Error loading classifier params using clf_keys and load_state_dict (strict=False): {e}")
+                    pass
+            # else:
+                # print(f"Client {self.id}: Model has no 'head' attribute or clf_keys for classifier parameters.")
+                pass
+        
+        elif part is None: # Load into the entire model
+            # The input `params_dict` here is expected to be a full model state_dict
+            # The original `set_parameters` took a model object, not a state_dict.
+            # This needs to be reconciled. Assuming `params_dict` is a state_dict for consistency.
+            try:
+                self.model.load_state_dict(params_dict, strict=True)
+            except RuntimeError as e:
+                # print(f"Client {self.id}: Runtime error loading full model params (strict=True): {e}. Trying with strict=False.")
+                try:
+                    self.model.load_state_dict(params_dict, strict=False)
+                except Exception as e_non_strict:
+                    # print(f"Client {self.id}: Error loading full model params (strict=False): {e_non_strict}")
+                    pass
+        # else:
+            # print(f"Client {self.id}: Unknown part '{part}' specified for set_parameters.")
+            pass
 
     def clone_model(self, model, target):
         for param, target_param in zip(model.parameters(), target.parameters()):

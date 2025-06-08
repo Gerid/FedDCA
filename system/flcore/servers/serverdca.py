@@ -1,854 +1,723 @@
 import copy
-import os
+import torch
+import torch.nn as nn
+import numpy as np
 import random
 import time
-import traceback
-import json
-from flcore.clients.clientdca import clientDCA
+import traceback # For detailed error logging
+# Removed: from sklearn.mixture import GaussianMixture
+# Removed: from sklearn.cluster import DBSCAN 
+import ot # Python Optimal Transport library
+# from scipy.stats import multivariate_normal # For GMM sampling if needed, or use np.random.multivariate_normal
+
 from flcore.servers.serverbase import Server
-import torch
-import numpy as np
-import scipy.stats as stats
-try:
-    import ot  # 导入POT库 (Python Optimal Transport)
-    POT_AVAILABLE = True
-except ImportError:
-    print("Warning: 未找到POT库，将使用替代方法计算Wasserstein距离")
-    POT_AVAILABLE = False
-    
-import matplotlib.pyplot as plt
-from sklearn.metrics import silhouette_score
-from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA
-from functools import wraps
-import wandb # Added wandb import
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from flcore.clients.clientdca import clientDCA # Ensure clientDCA is imported
+# ... other necessary imports ...
 
-class VariationalWassersteinClustering:
-    """简化的变分Wasserstein聚类实现"""
+# Removed GMM-specific sampling. This function now directly computes Sinkhorn distance between two sets of samples.
+def compute_sinkhorn_distance_samples(samples1, samples2, reg=0.1):
+    if samples1 is None or samples2 is None or samples1.size == 0 or samples2.size == 0 or samples1.shape[0] < 1 or samples2.shape[0] < 1:
+        return float('inf')
     
-    def __init__(self, num_clients, num_clusters, proxy_dim=32, sinkhorn_reg=0.01):
-        self.num_clients = num_clients
-        self.num_clusters = num_clusters
-        self.proxy_dim = proxy_dim
-        self.sinkhorn_reg = sinkhorn_reg
-    
-    def enhanced_clustering(self, label_conditional_data, device, verbose=False):
-        """执行增强的聚类算法"""
-        try:
-            if not label_conditional_data:
-                return None
-                
-            client_ids = list(label_conditional_data.keys())
-            num_clients = len(client_ids)
-            
-            if num_clients < 2:
-                return {client_ids[0]: 0} if client_ids else {}
-            
-            # 计算客户端之间的距离矩阵
-            distance_matrix = torch.zeros((num_clients, num_clients))
-            
-            for i, client_i in enumerate(client_ids):
-                for j, client_j in enumerate(client_ids):
-                    if i != j:
-                        distance = self._compute_client_distance(
-                            label_conditional_data[client_i],
-                            label_conditional_data[client_j]
-                        )
-                        distance_matrix[i, j] = distance
-            
-            # 使用K-means进行聚类
-            from sklearn.cluster import KMeans
-            
-            n_clusters = min(self.num_clusters, num_clients)
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            
-            # 将距离矩阵转换为特征矩阵
-            features = distance_matrix.numpy()
-            cluster_labels = kmeans.fit_predict(features)
-            
-            # 返回聚类结果
-            cluster_assignments = {}
-            for i, client_id in enumerate(client_ids):
-                cluster_assignments[client_id] = int(cluster_labels[i])
-            
-            if verbose:
-                print(f"VWC聚类完成，{len(set(cluster_labels))}个集群")
-                
-            return cluster_assignments
-            
-        except Exception as e:
-            print(f"VWC聚类失败: {e}")
-            return None
-    
-    def _compute_client_distance(self, client_i_data, client_j_data):
-        """计算两个客户端之间的距离"""
-        try:
-            # 获取共同标签
-            common_labels = set(client_i_data.keys()) & set(client_j_data.keys())
-            
-            if not common_labels:
-                return 1.0
-            
-            total_distance = 0.0
-            for label in common_labels:
-                features_i = client_i_data[label]
-                features_j = client_j_data[label]
-                
-                if isinstance(features_i, torch.Tensor):
-                    features_i = features_i.detach().cpu().numpy()
-                if isinstance(features_j, torch.Tensor):
-                    features_j = features_j.detach().cpu().numpy()
-                
-                # 计算简单的欧几里得距离
-                if features_i.size > 0 and features_j.size > 0:
-                    mean_i = np.mean(features_i.reshape(-1))
-                    mean_j = np.mean(features_j.reshape(-1))
-                    total_distance += abs(mean_i - mean_j)
-            
-            return total_distance / len(common_labels) if common_labels else 1.0
-            
-        except Exception:
-            return 0.5
+    s1 = samples1
+    s2 = samples2
 
-def perform_label_conditional_clustering(clients, num_clusters, device, verbose=False):
-    """执行基于标签条件的聚类"""
+    if s1.ndim == 1: s1 = s1.reshape(-1, 1)
+    if s2.ndim == 1: s2 = s2.reshape(-1, 1)
+
+    if s1.shape[1] != s2.shape[1]:
+        # print(f"Warning: Shape mismatch in compute_sinkhorn_distance_samples. s1: {s1.shape}, s2: {s2.shape}")
+        return float('inf')
+    if s1.shape[1] == 0 : # No features
+        return float('inf')
+
     try:
-        if not clients:
-            return {}
-            
-        # 简化实现：基于客户端ID进行均匀分配
-        cluster_assignments = {}
-        for i, client in enumerate(clients):
-            cluster_id = i % num_clusters
-            cluster_assignments[client.id] = cluster_id
+        # Assuming samples are weighted uniformly.
+        # Calculate the cost matrix M (e.g., squared Euclidean distance)
+        M = ot.dist(s1, s2, metric='sqeuclidean')
+
+        # Define uniform marginal distributions
+        a = np.ones((s1.shape[0],), dtype=np.float64) / s1.shape[0]
+        b = np.ones((s2.shape[0],), dtype=np.float64) / s2.shape[0]
         
-        if verbose:
-            print(f"标签条件聚类完成，{num_clusters}个集群")
-            
-        return cluster_assignments
+        # Use ot.sinkhorn to get the transport plan gamma
+        # Then compute the squared Sinkhorn distance as sum(gamma * M)
+        gamma = ot.sinkhorn(a, b, M, reg=reg, numItermax=200, stopThr=1e-7)
         
+        # The squared Sinkhorn distance (transport cost)
+        dist_sq_val = np.sum(gamma * M)
+
+        # No longer need to check if dist_sq_val is a tuple, as np.sum returns a scalar.
+
+        if np.isnan(dist_sq_val) or np.isinf(dist_sq_val):
+            return float('inf')
+        
+        # dist_sq_val is now the squared Sinkhorn distance.
+        # For comparison purposes, the squared distance is often sufficient and avoids sqrt.
+        # If the actual distance is needed, uncomment the next lines:
+        # if dist_sq_val < 0: # Should not happen with sqeuclidean cost and proper convergence
+        #     print(f"Warning: Negative squared Sinkhorn distance ({dist_sq_val}) before sqrt. Returning inf.")
+        #     return float('inf')
+        # return np.sqrt(dist_sq_val)
+        
+        return dist_sq_val # Returning squared distance for now
     except Exception as e:
-        print(f"标签条件聚类失败: {e}")
-        return {}
+        print(f"Error in compute_sinkhorn_distance_samples: {e}")
+        return float('inf')
 
+# Removed GMM-specific sampling and final GMM fitting.
+# This function now computes Wasserstein barycenter from a list of sample sets.
+# It returns the barycentric samples directly as an np.ndarray.
+def compute_wasserstein_barycenter_samples(client_sample_sets_list, client_weights, reg=0.1):
+    if not client_sample_sets_list or len(client_sample_sets_list) != len(client_weights):
+        # print("Warning: Invalid input for compute_wasserstein_barycenter_samples.")
+        return None
 
+    active_samples_list = []
+    active_weights = []
 
-class FedDCA(Server):    
+    for i, s_set in enumerate(client_sample_sets_list):
+        if s_set is None or s_set.size == 0:
+            continue
+        
+        current_samples = s_set
+        if current_samples.ndim == 1: current_samples = current_samples.reshape(-1, 1) # Ensure 2D
+        if current_samples.ndim == 0: continue
+
+        active_samples_list.append(current_samples)
+        active_weights.append(client_weights[i])
+
+    if not active_samples_list or not active_weights:
+        # print("Warning: No active samples or weights for barycenter computation.")
+        return None
+        
+    # Check dimensionality consistency
+    dim = active_samples_list[0].shape[1]
+    if not all(s.shape[1] == dim for s in active_samples_list):
+        # print("Warning: Dimensionality mismatch in samples for barycenter.")
+        return None
+    if dim == 0: 
+        # print("Warning: Zero dimensionality samples for barycenter.")
+        return None
+
+    normalized_weights = np.array(active_weights, dtype=np.float64)
+    sum_weights = np.sum(normalized_weights)
+    if sum_weights <= 0:
+        # print("Warning: Sum of weights is not positive for barycenter.")
+        return None 
+    normalized_weights /= sum_weights
+
+    try:
+        # ot.bregman.barycenter expects a list of sample arrays
+        barycentric_samples = ot.bregman.barycenter(
+            active_samples_list, 
+            reg=reg, 
+            weights=normalized_weights,
+            stopThr=1e-5, 
+            numItermax=150, # Consider making these configurable
+            verbose=False, 
+            log=False
+        )
+
+        if barycentric_samples is None or barycentric_samples.size == 0:
+            # print("Warning: Barycenter computation resulted in no samples.")
+            return None
+        
+        return barycentric_samples # Return the raw barycentric samples
+    except Exception as e:
+        # print(f"Error in compute_wasserstein_barycenter_samples: {e}")
+        # print(traceback.format_exc())
+        return None
+
+def _get_feature_extractor_module_from_model(model_instance):
+    if hasattr(model_instance, 'base') and model_instance.base is not None:
+        return model_instance.base
+    elif hasattr(model_instance, 'body') and model_instance.body is not None: # For models like ResNet
+        return model_instance.body
+    elif hasattr(model_instance, 'features') and model_instance.features is not None: # For models like VGG
+        return model_instance.features
+    elif hasattr(model_instance, 'encoder') and model_instance.encoder is not None: # For autoencoder-like models
+        return model_instance.encoder
+    # print(f"Warning: Could not identify feature extractor module from model.")
+    return None
+
+class FedDCA(Server):
     def __init__(self, args, times):
         super().__init__(args, times)
         self.set_slow_clients()
-        self.set_clients(clientDCA)
+        self.set_clients(clientDCA) 
         
         self.cluster_inited = False
         self.args = args
-        self.args.load_pretrain = False
+        self.args.load_pretrain = False 
 
-        # 初始化所有必要的字典
-        self.cluster_models = {}  # 映射集群到模型 (将存储分类器头 nn.Module)
-        self.clusters = {}  # 存储客户端到集群的映射
-        self.cluster_centroids = {}  # 存储每个集群的中心模型 (可能用途改变或移除)
-        self.client_features = {}  # 存储客户端的特征
+        self.client_label_profiles = {} 
+        self.client_label_profiles_history = {} 
+        self.drift_threshold_wasserstein = args.drift_threshold_wasserstein if hasattr(args, 'drift_threshold_wasserstein') else 0.5 
+        self.reduce_drifted_influence_factor = args.reduce_drifted_influence_factor if hasattr(args, 'reduce_drifted_influence_factor') else 1.0
+          # VWC specific attributes
+        self.vwc_reg = args.vwc_reg if hasattr(args, 'vwc_reg') else 0.1
+        self.vwc_num_samples_dist = args.vwc_num_samples_dist if hasattr(args, 'vwc_num_samples_dist') else 500
+        self.vwc_num_samples_bary = args.vwc_num_samples_bary if hasattr(args, 'vwc_num_samples_bary') else 500
+        self.vwc_num_samples_concept = args.vwc_num_samples_concept if hasattr(args, 'vwc_num_samples_concept') else 30 
+        self.vwc_num_centroid_samples = args.vwc_num_centroid_samples if hasattr(args, 'vwc_num_centroid_samples') else 30
+        self.vwc_max_iter = args.vwc_max_iter if hasattr(args, 'vwc_max_iter') else 10
+        self.vwc_K_t = args.vwc_K_t if hasattr(args, 'vwc_K_t') else 3 
+        self.vwc_drift_penalty_factor = args.vwc_drift_penalty_factor if hasattr(args, 'vwc_drift_penalty_factor') else 0.5
+        self.vwc_potential_update_factor = args.vwc_potential_update_factor if hasattr(args, 'vwc_potential_update_factor') else self.vwc_reg 
+        self.gmm_n_components_concept = args.gmm_n_components_concept if hasattr(args, 'gmm_n_components_concept') else 1
+        self.gmm_n_components_cluster = args.gmm_n_components_cluster if hasattr(args, 'gmm_n_components_cluster') else 1
+        self.gmm_cov_type_barycenter = args.gmm_cov_type_barycenter if hasattr(args, 'gmm_cov_type_barycenter') else 'full'
+        self.gmm_reg_covar_barycenter = args.gmm_reg_covar_barycenter if hasattr(args, 'gmm_reg_covar_barycenter') else 1e-6
 
+        self.cluster_classifiers = {}  
+        self.client_cluster_assignments = {}  
         
-        self.clf_keys = [] # 新增：存储分类器层的参数键名
+        self.clf_keys = [] 
+        if hasattr(args.model, 'head') and args.model.head is not None:
+            self.clf_keys = list(args.model.head.state_dict().keys())
         
-        # 添加聚类历史记录追踪
-        self.client_cluster_history = {}  # 客户端聚类历史，用于稳定性分析
-        
-        # 新增：默认设置聚类方法为增强型标签条件聚类
-        if not hasattr(args, 'clustering_method'):
-            self.args.clustering_method = 'enhanced_label'
-            
-        # 概念漂移相关参数设置
-        self.drift_threshold = args.drift_threshold if hasattr(args, 'drift_threshold') else 0.1
-        self.current_iteration = 0
-        self.max_iterations = args.max_iterations if hasattr(args, 'max_iterations') else 200
-        self.use_drift_dataset = args.use_drift_dataset if hasattr(args, 'use_drift_dataset') else False
-        self.drift_data_dir = args.drift_data_dir if hasattr(args, 'drift_data_dir') else "system/Cifar100_clustered/"
+        self.Budget = []
+        self.current_round = 0 
 
-        # 初始化 VWC 聚类器
-        self.vwc = VariationalWassersteinClustering(
-            num_clients=args.num_clients,
-            num_clusters=args.num_clusters,
-            proxy_dim=32,
-            sinkhorn_reg= 0.01
-        )
-
-        self.Budget = []  # 用于记录每轮训练的时间成本
-
-    def aggregate_rep_params(self, selected_clients):
-        """聚合表示层（body）参数从选定的客户端"""
-        if not selected_clients:
-            print("aggregate_rep_params: No clients available for aggregation")
-            return
-            
-        try:
-            # 收集所有客户端的表示层参数向量
-            client_rep_vectors = []
-            client_sample_nums = []
-            
-            for client in selected_clients:
-                # 获取客户端表示层参数向量
-                rep_vector = client.get_rep_parameters_vector()
-                if rep_vector is not None and rep_vector.numel() > 0:
-                    client_rep_vectors.append(rep_vector.to(self.device))
-                    # 使用客户端的训练样本数量作为权重
-                    sample_num = getattr(client, 'train_samples', 1)
-                    client_sample_nums.append(sample_num)
-                else:
-                    print(f"Warning: Client {client.id} has empty representation parameters")
-            
-            if not client_rep_vectors:
-                print("aggregate_rep_params: No valid representation parameters to aggregate")
-                return
-                
-            # 计算聚合权重（基于样本数量）
-            total_samples = sum(client_sample_nums)
-            weights = torch.tensor([num / total_samples for num in client_sample_nums], 
-                                 device=self.device, dtype=torch.float32)
-            
-            # 执行加权聚合
-            stacked_vectors = torch.stack(client_rep_vectors, dim=0)  # [num_clients, param_size]
-            aggregated_vector = torch.sum(weights.unsqueeze(1) * stacked_vectors, dim=0)
-            
-            # 将聚合后的参数向量设置回全局模型的body部分
-            if hasattr(self.global_model, 'body') and self.global_model.body is not None:
-                body_params = list(self.global_model.body.parameters())
-                if body_params:
-                    vector_to_parameters(aggregated_vector, body_params)
-                    print(f"aggregate_rep_params: Successfully aggregated representation parameters from {len(selected_clients)} clients")
-                else:
-                    print("Warning: Global model body has no parameters to update")
-            else:
-                print("Warning: Global model does not have a body attribute")
-                
-        except Exception as e:
-            print(f"Error in aggregate_rep_params: {str(e)}")
-
-    def aggregate_cluster_classifiers(self, selected_clients):
-        """聚合每个集群的分类器（head）参数"""
-        if not selected_clients:
-            print("aggregate_cluster_classifiers: No clients available for aggregation")
-            return
-            
-        try:
-            # 按集群组织客户端
-            clusters_clients = {}
-            for client in selected_clients:
-                cluster_id = self.clusters.get(client.id)
-                if cluster_id is not None:
-                    if cluster_id not in clusters_clients:
-                        clusters_clients[cluster_id] = []
-                    clusters_clients[cluster_id].append(client)
-                else:
-                    print(f"Warning: Client {client.id} not assigned to any cluster")
-            
-            # 为每个集群聚合分类器参数
-            for cluster_id, cluster_clients in clusters_clients.items():
-                if not cluster_clients:
-                    continue
-                    
-                # 收集该集群中所有客户端的分类器参数
-                clf_state_dicts = []
-                client_sample_nums = []
-                
-                for client in cluster_clients:
-                    clf_params = client.get_clf_parameters()
-                    if clf_params:
-                        clf_state_dicts.append(clf_params)
-                        sample_num = getattr(client, 'train_samples', 1)
-                        client_sample_nums.append(sample_num)
-                
-                if not clf_state_dicts:
-                    print(f"Warning: No valid classifier parameters for cluster {cluster_id}")
-                    continue
-                
-                # 计算聚合权重
-                total_samples = sum(client_sample_nums)
-                weights = [num / total_samples for num in client_sample_nums]
-                
-                # 聚合分类器参数
-                aggregated_clf_state_dict = {}
-                for key in clf_state_dicts[0].keys():
-                    # 确保所有客户端都有这个参数
-                    if all(key in state_dict for state_dict in clf_state_dicts):
-                        # 执行加权平均
-                        weighted_sum = sum(w * state_dict[key].to(self.device) 
-                                         for w, state_dict in zip(weights, clf_state_dicts))
-                        aggregated_clf_state_dict[key] = weighted_sum
-                    else:
-                        print(f"Warning: Parameter {key} not found in all clients for cluster {cluster_id}")
-                
-                # 创建或更新集群分类器模型
-                if cluster_id not in self.cluster_models:
-                    # 创建新的分类器模型
-                    if hasattr(self.global_model, 'head') and self.global_model.head is not None:
-                        self.cluster_models[cluster_id] = copy.deepcopy(self.global_model.head)
-                    else:
-                        print(f"Warning: Cannot create cluster model for cluster {cluster_id} - no head template")
-                        continue
-                
-                # 加载聚合后的参数
-                self.cluster_models[cluster_id].load_state_dict(aggregated_clf_state_dict)
-                print(f"aggregate_cluster_classifiers: Updated cluster {cluster_id} with {len(cluster_clients)} clients")
-                
-        except Exception as e:
-            print(f"Error in aggregate_cluster_classifiers: {str(e)}")
-
-    def vwc_clustering(self):
-        """初始化聚类"""
-        try:
-            # 收集所有客户端的代理数据
-            proxy_points = {}
-            for client in self.selected_clients:
-                if hasattr(client, 'intermediate_output') and callable(client.intermediate_output):
-                    try:
-                        proxy_points[client.id] = client.intermediate_output()
-                    except:
-                        print(f"Warning: Failed to get intermediate output from client {client.id}")
-
-            if not proxy_points:
-                print("Warning: No proxy data available for clustering")
-                # 使用均匀分配
-                for i, client in enumerate(self.selected_clients):
-                    self.clusters[client.id] = i % self.args.num_clusters
-                return
-
-            # 确保有足够的样本进行聚类
-            num_samples = len(proxy_points)
-            if num_samples < self.args.num_clusters:
-                print(f"Warning: Number of proxy points ({num_samples}) is less than the number of clusters ({self.args.num_clusters})")
-                self.args.num_clusters = max(1, num_samples)
-
-            # 随机选择初始集群中心
-            cluster_centers = {}
-            center_client_ids = random.sample(list(proxy_points.keys()), self.args.num_clusters)
-            for i, client_id in enumerate(center_client_ids):
-                cluster_centers[i] = proxy_points[client_id]
-                self.cluster_centroids[i] = copy.deepcopy(self.global_model)
-
-            # 为每个客户端分配最近的集群
-            for client_id, client_data in proxy_points.items():
-                if isinstance(client_data, torch.Tensor):
-                    distances = {}
-                    for cluster_id, center in cluster_centers.items():
-                        if isinstance(center, torch.Tensor):
-                            distances[cluster_id] = torch.norm(client_data - center).item()
-                        else:
-                            distances[cluster_id] = 1.0
-                    closest_cluster = min(distances, key=distances.get)
-                    self.clusters[client_id] = closest_cluster
-                else:
-                    # 如果数据格式不对，随机分配
-                    self.clusters[client_id] = random.randint(0, self.args.num_clusters - 1)
-
-        except Exception as e:
-            print(f"Error in VWC clustering: {str(e)}")
-            # 发生错误时，确保每个客户端至少被分配到默认集群
-            for client in self.selected_clients:
-                if client.id not in self.clusters:
-                    self.clusters[client.id] = 0
-            if 0 not in self.cluster_centroids:
-                self.cluster_centroids[0] = copy.deepcopy(self.global_model)
-
-    def select_clustering_algorithm(self):
-        """根据配置选择使用的聚类算法"""
-        # 默认使用原始的VWC
-        clustering_method = 'vwc'
-        
-        # 如果在args中指定了聚类方法，则使用指定的方法
-        if hasattr(self.args, 'clustering_method'):
-            clustering_method = self.args.clustering_method
-            
-        # 确保聚类方法是有效的
-        valid_methods = ['vwc', 'label_conditional', 'enhanced_label']
-        if clustering_method not in valid_methods:
-            print(f"警告：未知的聚类方法 '{clustering_method}'，使用默认的 'vwc' 方法")
-            clustering_method = 'vwc'
-            
-        return clustering_method
-
-    def perform_label_conditional_clustering(self, verbose=False):
-        """执行基于标签条件分布的Wasserstein聚类"""
-        print("使用基于标签条件的Wasserstein聚类...")
-        try:
-            # 使用标签条件聚类函数
-            cluster_assignments = perform_label_conditional_clustering(
-                clients=self.selected_clients,
-                num_clusters=self.args.num_clusters,
-                device=self.device,
-                verbose=verbose
-            )
-            
-            # 如果聚类成功，更新客户端分配
-            if cluster_assignments:
-                # 记录历史分配（用于分析聚类稳定性）
-                for client_id, cluster_id in cluster_assignments.items():
-                    if client_id not in self.client_cluster_history:
-                        self.client_cluster_history[client_id] = []
-                    self.client_cluster_history[client_id].append(cluster_id)
-                
-                # 更新当前分配
-                self.clusters.update(cluster_assignments)
-                print(f"标签条件聚类完成，形成 {len(set(self.clusters.values()))} 个集群")
-                return True
-            else:
-                print("警告: 标签条件聚类未能产生有效结果")
-                return False
-        except Exception as e:
-            print(f"标签条件聚类失败: {str(e)}")
-            return False
-
-    def perform_enhanced_label_conditional_clustering(self, verbose=False):
-        """执行增强的基于标签条件分布的聚类算法"""
-        print("使用增强的标签条件聚类算法...")
-        try:
-            # 收集标签条件代理数据
-            label_conditional_data = self.collect_label_conditional_proxy_data()
-            
-            if not label_conditional_data:
-                print("Warning: 没有足够的标签条件代理数据进行聚类，退回到VWC聚类")
-                self.vwc_clustering()
-                return True
-            
-            # 使用改进的VWC聚类器
-            try:
-                cluster_assignments = self.vwc.enhanced_clustering(
-                    label_conditional_data=label_conditional_data,
-                    device=self.device,
-                    verbose=verbose
-                )
-                
-                if cluster_assignments:
-                    # 更新集群分配
-                    self.clusters.update(cluster_assignments)
-                    
-                    # 记录聚类历史
-                    for client_id, cluster_id in cluster_assignments.items():
-                        if client_id not in self.client_cluster_history:
-                            self.client_cluster_history[client_id] = []
-                        self.client_cluster_history[client_id].append(cluster_id)
-                    
-                    print(f"增强标签条件聚类完成，形成 {len(set(self.clusters.values()))} 个集群")
-                    return True
-                else:
-                    print("警告: 增强标签条件聚类失败，退回到标准聚类")
-                    self.vwc_clustering()
-                    return True
-                    
-            except Exception as vwc_error:
-                print(f"VWC增强聚类失败: {str(vwc_error)}")
-                # 退回到标签条件聚类
-                return self.perform_label_conditional_clustering(verbose=verbose)
-                
-        except Exception as e:
-            print(f"增强标签条件聚类失败: {str(e)}")
-              # 确保每个客户端至少被分配到默认集群
-            for client in self.selected_clients:
-                if client.id not in self.clusters:
-                    self.clusters[client.id] = 0
-                
-                # 更新历史记录
-                if client.id not in self.client_cluster_history:
-                    self.client_cluster_history[client.id] = []
-                self.client_cluster_history[client.id].append(0)
-            
-            return False
-    
-    def collect_label_conditional_proxy_data(self):
-        """收集每个客户端按标签条件分组的代理数据，使用GMM生成代理数据点"""
-        label_conditional_proxy_data = {}
-        
-        for client in self.selected_clients:
-            try:
-                # 从客户端获取按标签分组的特征
-                if hasattr(client, 'get_intermediate_outputs_with_labels'):
-                    features_by_label = client.get_intermediate_outputs_with_labels()
-                else:
-                    # 如果客户端没有这个方法，使用简化版本
-                    features_by_label = {}
-                
-                if not features_by_label:
-                    print(f"Warning: No label-conditional features available for client {client.id}")
-                    continue
-                
-                # 为当前客户端创建标签条件代理数据
-                label_conditional_proxy_data[client.id] = {}
-                
-                # 对每个标签的特征生成代理数据点
-                for label, features in features_by_label.items():
-                    # 确保特征数据格式正确
-                    if isinstance(features, torch.Tensor):
-                        features = features.detach().cpu().numpy()
-                    
-                    # 跳过空的特征集
-                    if features.size == 0 or features.shape[0] == 0:
-                        continue
-                      # 处理一维数据
-                    if features.ndim == 1:
-                        features = features.reshape(-1, 1)
-                        
-                    # 如果样本数足够，使用GMM估计分布
-                    if features.shape[0] >= 5:  
-                        try:
-                            # 使用GMM生成代理数据
-                            num_samples = min(getattr(self.args, 'gmm_samples', 20), max(20, features.shape[0]))
-                            sampled = self.generate_proxy_data_gmm(features, num_samples)
-                            label_conditional_proxy_data[client.id][label] = sampled
-                        except Exception as e:
-                            print(f"GMM failed for client {client.id} label {label}: {str(e)}")
-                            # GMM失败，使用原始特征
-                            label_conditional_proxy_data[client.id][label] = features
-                    else:
-                        # 如果样本太少，直接使用原始数据
-                        label_conditional_proxy_data[client.id][label] = features
-                        
-            except Exception as e:
-                print(f"Error collecting data from client {client.id}: {str(e)}")
-                continue
-        
-        return label_conditional_proxy_data
-
-    def evaluate_cluster_performance(self, current_round=None):
-        """评估每个集群的性能"""
-        try:
-            cluster_stats = {}
-            
-            for client in self.selected_clients:
-                cluster_id = self.clusters.get(client.id)
-                if cluster_id is not None:
-                    if cluster_id not in cluster_stats:
-                        cluster_stats[cluster_id] = {
-                            'clients': [],
-                            'test_acc': [],
-                            'train_loss': [],
-                            'sample_nums': []
-                        }
-                    
-                    # 获取客户端性能指标
-                    try:
-                        test_acc, test_num, _ = client.test_metrics()
-                        train_loss, train_num = client.train_metrics()
-                        
-                        cluster_stats[cluster_id]['clients'].append(client.id)
-                        if test_num > 0:
-                            cluster_stats[cluster_id]['test_acc'].append(test_acc / test_num)
-                        if train_num > 0:
-                            cluster_stats[cluster_id]['train_loss'].append(train_loss / train_num)
-                        cluster_stats[cluster_id]['sample_nums'].append(test_num)
-                        
-                    except Exception as e:
-                        print(f"Error getting metrics for client {client.id}: {str(e)}")
-            
-            # 计算并显示每个集群的平均性能
-            print(f"\n=== Cluster Performance (Round {current_round}) ===")
-            total_weighted_acc = 0
-            total_samples = 0
-            
-            for cluster_id, stats in cluster_stats.items():
-                if stats['test_acc']:
-                    # 计算加权平均准确率
-                    weighted_acc = sum(acc * num for acc, num in zip(stats['test_acc'], stats['sample_nums']))
-                    cluster_samples = sum(stats['sample_nums'])
-                    avg_acc = weighted_acc / cluster_samples if cluster_samples > 0 else 0
-                    
-                    total_weighted_acc += weighted_acc
-                    total_samples += cluster_samples
-                    
-                    avg_loss = np.mean(stats['train_loss']) if stats['train_loss'] else 0
-                    
-                    print(f"Cluster {cluster_id}: {len(stats['clients'])} clients, "
-                          f"Avg Acc: {100*avg_acc:.2f}%, Avg Loss: {avg_loss:.4f}")
-                else:
-                    print(f"Cluster {cluster_id}: {len(stats['clients'])} clients, No performance data")
-            
-            # 计算总体加权平均准确率
-            if total_samples > 0:
-                overall_avg_acc = total_weighted_acc / total_samples
-                print(f"Overall Weighted Avg Accuracy: {100*overall_avg_acc:.2f}%")
-                
-                # 记录到wandb
-                if wandb.run is not None:
-                    wandb.log({
-                        "cluster_performance/overall_accuracy": overall_avg_acc,
-                        "cluster_performance/num_clusters": len(cluster_stats),
-
-                    }, step=self.current_round)
-                    
-        except Exception as e:
-            print(f"Error in evaluate_cluster_performance: {str(e)}")
-
-    def log_cluster_assignments(self, current_round):
-        """记录当前轮次的集群分配情况"""
-        try:
-            cluster_distribution = {}
-            for client_id, cluster_id in self.clusters.items():
-                if cluster_id not in cluster_distribution:
-                    cluster_distribution[cluster_id] = []
-                cluster_distribution[cluster_id].append(client_id)
-            
-            print(f"\n=== Cluster Assignments (Round {current_round}) ===")
-            for cluster_id, client_ids in cluster_distribution.items():
-                print(f"Cluster {cluster_id}: {len(client_ids)} clients {client_ids}")
-            
-            # 记录到wandb
-            if wandb.run is not None:
-                cluster_sizes = {f"cluster_{cid}_size": len(clients) 
-                               for cid, clients in cluster_distribution.items()}
-                wandb.log({
-                    "cluster_assignments/num_clusters": len(cluster_distribution),
-                    **cluster_sizes,
-                }, step=self.current_round)
-                
-        except Exception as e:
-            print(f"Error in log_cluster_assignments: {str(e)}")
-
-    #@plot_metrics()
     def train(self):
         for i in range(self.global_rounds + 1):
-            s_t = time.time()
             self.current_round = i
-            if self.args.verbose:
-                print(f"\n FedDCA Round {i} Starting...")
-
             self.selected_clients = self.select_clients()
-            if not self.selected_clients:
-                print(f"Round {i}: No clients selected. Skipping round.")
-                self.Budget.append(time.time() - s_t)
-                continue            # 1. Clients perform local training
-            if self.args.verbose:
-                print(f"Round {i}: Starting local training for {len(self.selected_clients)} clients.")
-            
-            # Apply concept drift transformation if needed
-            self.apply_drift_transformation()
-            
-            for client in self.selected_clients:
-                client.train()
-            if self.args.verbose:
-                print(f"Round {i}: Local training completed.")
+            self.send_models() 
 
-            # 2. Aggregate Representation Layers (body)
-            if self.args.verbose:
-                print(f"Round {i}: Aggregating representation layers (body)...")
-            self.aggregate_rep_params(self.selected_clients)
-
-            # 3. Send the newly aggregated global body to clients
-            if self.args.verbose:
-                print(f"Round {i}: Sending updated global body to clients.")
-            if hasattr(self.global_model, 'body') and self.global_model.body is not None:
-                global_rep_vector = parameters_to_vector([p.clone().detach() for p in self.global_model.body.parameters()])
-                if global_rep_vector.numel() > 0:
-                    for client in self.selected_clients:
-                        client.receive_global_model_body(global_rep_vector.clone())
-                else:
-                    print(f"Round {i}: Warning - Global representation vector is empty.")
-            else:
-                print(f"Round {i}: Warning - Global model body not found.")
-
-            # 4. Perform Clustering
-            if self.args.verbose:
-                print(f"Round {i}: Performing clustering...")
-            clustering_method = self.select_clustering_algorithm()
-            if clustering_method == 'vwc':
-                self.vwc_clustering() 
-            elif clustering_method == 'label_conditional':
-                self.perform_label_conditional_clustering(verbose=self.args.verbose)
-            elif clustering_method == 'enhanced_label':
-                self.perform_enhanced_label_conditional_clustering(verbose=self.args.verbose)
-            else:
-                self.vwc_clustering()  # Default fallback
-            
-            self.log_cluster_assignments(i)
-            if self.args.verbose:
-                print(f"Round {i}: Clustering complete. Clusters: {self.clusters}")
-
-            # 5. Aggregate Classifiers (head) for each cluster
-            if self.args.verbose:
-                print(f"Round {i}: Aggregating classifiers (heads) for each cluster...")
-            self.aggregate_cluster_classifiers(self.selected_clients)
-
-            # 6. Send updated models to clients
-            if self.args.verbose:
-                print(f"Round {i}: Sending cluster-specific heads to clients.")
-            self.send_models_to_clients(self.selected_clients)
-
-            # Evaluation and Logging
             if i % self.eval_gap == 0:
-                if self.args.verbose:
-                    print(f"\n-------------Round {i} Evaluation-------------")
-                self.evaluate(current_round=i)
-                self.evaluate_cluster_performance(current_round=i) 
-            
-            self.Budget.append(time.time() - s_t)
-            if self.args.verbose:
-                print(f"Round {i} completed. Time cost: {self.Budget[-1]:.2f}s")
+                print(f"\n-------------Round number: {i}--------------")
+                print("Evaluate global model")
+                self.evaluate()
 
-            if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
-                print(f"Auto-break condition met at round {i}.")
-                break
-        
-        print("\n======== FedDCA Training Complete =========")
-        if self.rs_test_acc:
-            print(f"Best Test Accuracy: {max(self.rs_test_acc):.4f}")
-        if len(self.Budget) > 1:
-            print(f"Average Time Cost per Round: {np.mean(self.Budget[1:]):.2f}s")
+            for client in self.selected_clients:
+                client.train() 
+            
+            self.receive_client_updates()
+            self.perform_drift_analysis_and_adaptation()
+            
+            current_K_t = self.vwc_K_t 
+            if len(self.client_label_profiles) > 0 :
+                 self.run_vwc_clustering(self.client_label_profiles, self.client_drift_status, current_K_t)
+            else:
+                print("No client profiles received, skipping VWC clustering.")
+                for client_obj in self.selected_clients: 
+                    self.client_cluster_assignments[client_obj.id] = 0
+
+            self.aggregate_parameters()
+            
+            # if hasattr(self, 'learning_rate_scheduler') and self.learning_rate_scheduler is not None:
+            #     self.learning_rate_scheduler.step()
+
+        print("\nFinal Global Trainning accuracy:")
+        self.print_(max(self.rs_train_acc), max(self.rs_train_loss))
+        print("\nFinal Global Test accuracy:")
+        self.print_(max(self.rs_test_acc), max(self.rs_global_test_acc), max(self.rs_test_auc))
 
         self.save_results()
+        self.save_global_model()
 
-    def send_models_to_clients(self, clients_to_send_to):
-        """Sends the cluster-specific classifier (head) to clients."""
-        if not self.cluster_models:
-            if self.args.verbose:
-                print("send_models_to_clients: No cluster models (heads) available to send.")
+    def send_models(self):
+        if not self.selected_clients:
             return
 
-        for client in clients_to_send_to:
-            cluster_id_for_client = None
-            # 修复：正确查找客户端的集群ID
-            cluster_id_for_client = self.clusters.get(client.id)
+        feature_extractor_params = None
+        if hasattr(self.global_model, 'base') and self.global_model.base is not None:
+            feature_extractor_params = {k: v.cpu() for k, v in self.global_model.base.state_dict().items()}
+        elif hasattr(self.global_model, 'body') and self.global_model.body is not None:
+             feature_extractor_params = {k: v.cpu() for k, v in self.global_model.body.state_dict().items()}
+        else: 
+            print("Warning: Could not determine feature extractor from global_model for sending.")
+            feature_extractor_params = {k: v.cpu() for k, v in self.global_model.state_dict().items()} 
+
+        for client in self.selected_clients:
+            client.set_parameters(feature_extractor_params, part='feature_extractor')
             
-            if cluster_id_for_client is not None and cluster_id_for_client in self.cluster_models:
-                cluster_head_module = self.cluster_models[cluster_id_for_client]
-                if cluster_head_module is not None:
-                    client.receive_cluster_model(copy.deepcopy(cluster_head_module.state_dict()))
-                    if self.args.verbose:
-                        print(f"Client {client.id} (Cluster {cluster_id_for_client}): Received cluster head.")
+            cluster_id = self.client_cluster_assignments.get(client.id)
+            if cluster_id is not None and cluster_id in self.cluster_classifiers:
+                classifier_params = {k: v.cpu() for k, v in self.cluster_classifiers[cluster_id].state_dict().items()}
+                client.set_parameters(classifier_params, part='classifier')
+            else:
+                if hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                    default_classifier_params = {k: v.cpu() for k, v in self.global_model.head.state_dict().items()}
+                    client.set_parameters(default_classifier_params, part='classifier')
+
+    def receive_client_updates(self):
+        self.client_label_profiles.clear()
+        self.client_feature_extractors_params = {} # Assuming this might be used elsewhere or for future features
+        self.client_classifier_params = {} # To store received classifier heads
+
+        for client in self.selected_clients:
+            # lp_c_t is now expected to be: Dict[label, Tuple[np.ndarray_samples, np.ndarray_losses]]
+            # Ensure client.get_label_profiles() in clientdca.py returns this structure.
+            lp_c_t = client.get_label_profiles() 
+            self.client_label_profiles[client.id] = lp_c_t
+            
+            # Store history of label profiles (samples and losses)
+            if client.id not in self.client_label_profiles_history:
+                self.client_label_profiles_history[client.id] = {}
+            # Use copy.deepcopy for mutable structures like dicts containing numpy arrays
+            self.client_label_profiles_history[client.id][self.current_round] = copy.deepcopy(lp_c_t)
+
+            # Get classifier parameters from client
+            if hasattr(client, 'get_clf_parameters'): # Corrected method name
+                clf_params = client.get_clf_parameters() # Corrected method name
+                if clf_params:
+                    self.client_classifier_params[client.id] = clf_params            # else:
+            #     print(f"Warning: Client {client.id} does not have get_clf_parameters method.")
+
+    def perform_drift_analysis_and_adaptation(self):
+        self.client_drift_status = {} 
+        for client_id, profile_history in self.client_label_profiles_history.items():
+            if self.current_round > 0 and (self.current_round - 1) in profile_history and self.current_round in profile_history:
+                # profile_history[round] is Dict[label, Tuple[samples, losses]]
+                label_data_t = profile_history[self.current_round] 
+                label_data_t_minus_1 = profile_history[self.current_round - 1]
+                
+                total_wasserstein_dist = 0
+                num_common_labels = 0
+                
+                for label, data_t_for_label in label_data_t.items():
+                    if label in label_data_t_minus_1:
+                        data_t_minus_1_for_label = label_data_t_minus_1[label]
+                        
+                        current_label_samples = data_t_for_label[0] # Extract samples
+                        previous_label_samples = data_t_minus_1_for_label[0] # Extract samples
+                        
+                        # Corrected multi-line if condition using parentheses
+                        if (current_label_samples is not None and previous_label_samples is not None and
+                            current_label_samples.size > 0 and previous_label_samples.size > 0):
+                            
+                            dist = compute_sinkhorn_distance_samples(
+                                current_label_samples, 
+                                previous_label_samples,
+                                reg=self.vwc_reg
+                            )
+                            if dist != float('inf'):
+                                total_wasserstein_dist += dist
+                                num_common_labels += 1
+                
+                avg_wasserstein_dist = total_wasserstein_dist / num_common_labels if num_common_labels > 0 else 0
+
+                if avg_wasserstein_dist > self.drift_threshold_wasserstein:
+                    self.client_drift_status[client_id] = True
                 else:
-                    if self.args.verbose:
-                        print(f"Client {client.id} (Cluster {cluster_id_for_client}): Cluster head model is None.")
-            elif self.args.verbose:
-                print(f"Client {client.id}: Not found in cluster assignments or cluster model missing.")
+                    self.client_drift_status[client_id] = False
+            else:
+                self.client_drift_status[client_id] = False
+    
+    def run_vwc_clustering(self, all_client_label_data, drift_status, K_t):
+        """
+        Performs label-wise Variational Wasserstein Clustering (VWC).
+        
+        Key changes:
+        1. Cluster centroids are represented as Dict[label, np.ndarray_samples] per cluster
+        2. Client-to-cluster distance is computed as average of per-label Sinkhorn distances
+        3. Centroid updates use N lowest-loss samples per label from member clients
+        
+        Args:
+            all_client_label_data: Dict[client_id, Dict[label, Tuple[samples, losses]]]
+            drift_status: Dict[client_id, bool] indicating drift status
+            K_t: Number of clusters
+        """
+        current_seed = getattr(self.args, 'seed', None)
+        num_centroid_samples = getattr(self.args, 'vwc_num_centroid_samples', 30)
+
+        client_ids = list(all_client_label_data.keys())
+        if not client_ids:
+            print("VWC: No clients to cluster.")
+            self.client_cluster_assignments.clear()
+            return
+
+        if K_t <= 0:
+            print(f"VWC: Invalid number of clusters K_t = {K_t}. Defaulting all to cluster 0.")
+            for cid in client_ids:
+                self.client_cluster_assignments[cid] = 0
+            return
+
+        # Filter clients with valid label data
+        active_client_ids = []
+        for client_id in client_ids:
+            client_label_profiles = all_client_label_data.get(client_id, {})
+            if client_label_profiles:  # Client has at least some label data
+                active_client_ids.append(client_id)
+
+        if not active_client_ids:
+            print("VWC: No clients with valid label profiles. Assigning all to cluster 0.")
+            for cid in client_ids:
+                self.client_cluster_assignments[cid] = 0
+            return
+
+        # Adjust K_t based on available clients
+        actual_K_t = min(K_t, len(active_client_ids))
+        if actual_K_t <= 0:
+            actual_K_t = 1
+        if K_t != actual_K_t:
+            print(f"VWC: Adjusted K_t from {K_t} to {actual_K_t} due to limited active clients.")
+        K_t = actual_K_t
+
+        # Initialize cluster centroids - each centroid is a Dict[label, samples]
+        cluster_centroids_vk_dicts = []
+        
+        # Select K_t clients to initialize centroids
+        if current_seed is not None:
+            random.seed(current_seed)
+        
+        num_to_sample_init = min(K_t, len(active_client_ids))
+        initial_client_indices = random.sample(range(len(active_client_ids)), num_to_sample_init)
+        
+        for i in range(num_to_sample_init):
+            client_idx = initial_client_indices[i]
+            client_id = active_client_ids[client_idx]
+            client_label_profiles = all_client_label_data[client_id]
+            
+            # Create initial centroid from this client's label profiles
+            initial_centroid = {}
+            for label, (samples, losses) in client_label_profiles.items():
+                if samples is not None and samples.size > 0 and losses is not None and losses.size > 0:
+                    # Select num_centroid_samples lowest-loss samples for this label
+                    if samples.shape[0] == losses.shape[0]:
+                        sorted_indices = np.argsort(losses)
+                        num_samples_to_take = min(num_centroid_samples, samples.shape[0])
+                        selected_samples = samples[sorted_indices[:num_samples_to_take]]
+                        
+                        # Pad samples if fewer than num_centroid_samples
+                        current_num_samples = selected_samples.shape[0]
+                        if current_num_samples > 0 and current_num_samples < num_centroid_samples:
+                            num_repeats = num_centroid_samples // current_num_samples
+                            remainder = num_centroid_samples % current_num_samples
+                            
+                            padded_samples_list = [selected_samples] * num_repeats
+                            if remainder > 0:
+                                padded_samples_list.append(selected_samples[:remainder])
+                            
+                            if padded_samples_list: # Ensure list is not empty before vstack
+                                selected_samples = np.vstack(padded_samples_list)
+
+                        initial_centroid[label] = copy.deepcopy(selected_samples)
+            
+            if initial_centroid:  # Only add if centroid has at least one label
+                cluster_centroids_vk_dicts.append(initial_centroid)
+
+        # Handle case where we need more centroids (duplicate existing ones)
+        while len(cluster_centroids_vk_dicts) < K_t:
+            if cluster_centroids_vk_dicts:
+                idx_to_duplicate = len(cluster_centroids_vk_dicts) % len(cluster_centroids_vk_dicts)
+                cluster_centroids_vk_dicts.append(copy.deepcopy(cluster_centroids_vk_dicts[idx_to_duplicate]))
+            else:
+                # Fallback: create empty centroid
+                cluster_centroids_vk_dicts.append({})
+
+        # Update K_t to actual number of initialized centroids
+        K_t = len(cluster_centroids_vk_dicts)
+        if K_t == 0:
+            print("VWC: Could not initialize any cluster centroids. Assigning all to cluster 0.")
+            for cid in client_ids:
+                self.client_cluster_assignments[cid] = 0
+            return
+
+        # VWC iteration
+        current_assignments = {cid: -1 for cid in active_client_ids}
+        
+        for vwc_iter in range(self.vwc_max_iter):
+            new_assignments = {}
+            
+            # Assignment Step: Assign each client to closest cluster
+            for client_id in active_client_ids:
+                client_label_profiles = all_client_label_data[client_id]
+                min_avg_distance = float('inf')
+                assigned_cluster_idx = -1
+                
+                for k_idx in range(K_t):
+                    cluster_centroid = cluster_centroids_vk_dicts[k_idx]
+                    
+                    # Compute distance as average of per-label Sinkhorn distances
+                    total_distance = 0.0
+                    num_common_labels = 0
+                    
+                    for label in client_label_profiles.keys():
+                        if label in cluster_centroid:
+                            client_samples, _ = client_label_profiles[label]
+                            centroid_samples = cluster_centroid[label]
+                            
+                            if (client_samples is not None and client_samples.size > 0 and
+                                centroid_samples is not None and centroid_samples.size > 0):
+                                
+                                distance = compute_sinkhorn_distance_samples(
+                                    client_samples, centroid_samples, reg=self.vwc_reg
+                                )
+                                
+                                if distance != float('inf'):
+                                    total_distance += distance
+                                    num_common_labels += 1
+                    
+                    # Average distance over common labels
+                    if num_common_labels > 0:
+                        avg_distance = total_distance / num_common_labels
+                        
+                        # Apply drift penalty if client is drifted
+                        if drift_status.get(client_id, False):
+                            avg_distance += self.vwc_drift_penalty_factor * avg_distance
+                        
+                        if avg_distance < min_avg_distance:
+                            min_avg_distance = avg_distance
+                            assigned_cluster_idx = k_idx
+                
+                if assigned_cluster_idx != -1:
+                    new_assignments[client_id] = assigned_cluster_idx
+                else:
+                    # Fallback: assign to cluster 0 if no valid assignment found
+                    new_assignments[client_id] = 0
+
+            # Check for convergence
+            converged = True
+            if vwc_iter > 0:
+                for cid, assigned_k in current_assignments.items():
+                    if assigned_k != new_assignments.get(cid, -1):
+                        converged = False
+                        break
+                
+                if converged:
+                    break
+            
+            current_assignments = new_assignments
+
+            # Update Step: Update cluster centroids based on member clients
+            new_cluster_centroids = []
+            
+            for k_idx in range(K_t):
+                # Find clients assigned to this cluster
+                clients_in_cluster = [cid for cid, assigned_k in new_assignments.items() if assigned_k == k_idx]
+                
+                if not clients_in_cluster:
+                    # Keep old centroid if cluster is empty
+                    if k_idx < len(cluster_centroids_vk_dicts):
+                        new_cluster_centroids.append(copy.deepcopy(cluster_centroids_vk_dicts[k_idx]))
+                    else:
+                        new_cluster_centroids.append({})
+                    continue
+
+                # Collect all labels present in member clients
+                all_labels_in_cluster = set()
+                for cid in clients_in_cluster:
+                    all_labels_in_cluster.update(all_client_label_data[cid].keys())
+
+                # For each label, pool samples from all member clients and select lowest-loss ones
+                new_centroid = {}
+                for label in all_labels_in_cluster:
+                    pooled_samples_list = []
+                    pooled_losses_list = []
+                    
+                    for cid in clients_in_cluster:
+                        if label in all_client_label_data[cid]:
+                            samples, losses = all_client_label_data[cid][label]
+                            if (samples is not None and samples.size > 0 and
+                                losses is not None and losses.size > 0 and
+                                samples.shape[0] == losses.shape[0]):
+                                pooled_samples_list.append(samples)
+                                pooled_losses_list.append(losses)
+                    
+                    if pooled_samples_list:
+                        # Combine all samples and losses for this label
+                        combined_samples = np.vstack(pooled_samples_list)
+                        combined_losses = np.concatenate(pooled_losses_list)
+                        
+                        # Select num_centroid_samples lowest-loss samples
+                        sorted_indices = np.argsort(combined_losses)
+                        num_samples_to_take = min(num_centroid_samples, combined_samples.shape[0])
+                        centroid_samples_for_label = combined_samples[sorted_indices[:num_samples_to_take]]
+                        new_centroid[label] = centroid_samples_for_label
+
+                new_cluster_centroids.append(new_centroid)
+
+            # Update centroids
+            cluster_centroids_vk_dicts = new_cluster_centroids
+
+        # Final assignment for all clients (including inactive ones)
+        final_client_assignments = {}
+        for client_id in client_ids:
+            if client_id in current_assignments:
+                final_client_assignments[client_id] = current_assignments[client_id]
+            else:
+                # Assign inactive clients to cluster 0
+                final_client_assignments[client_id] = 0
+
+        self.client_cluster_assignments = final_client_assignments
+
+        # Aggregate classifier heads for each cluster
+        self.cluster_classifiers.clear()
+        client_id_to_datasize_map = {client.id: client.train_samples for client in self.clients if hasattr(client, 'train_samples')}
+
+        for k_idx in range(K_t):
+            clients_assigned_to_k = [cid for cid, assigned_k in self.client_cluster_assignments.items() if assigned_k == k_idx]
+            
+            if not clients_assigned_to_k:
+                # Empty cluster, use global head
+                if hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                    self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
+                continue
+
+            # Collect classifier parameters from cluster members
+            classifier_heads_params_list = []
+            data_sizes_list = []
+            
+            for cid in clients_assigned_to_k:
+                if cid in self.client_classifier_params:
+                    classifier_heads_params_list.append(self.client_classifier_params[cid])
+                    data_sizes_list.append(client_id_to_datasize_map.get(cid, 1.0))
+            
+            if classifier_heads_params_list:
+                # Weighted average of classifier parameters
+                aggregated_params = {}
+                first_head_keys = classifier_heads_params_list[0].keys()
+
+                for key in first_head_keys:
+                    weighted_sum = torch.zeros_like(classifier_heads_params_list[0][key], dtype=torch.float32)
+                    total_weight = 0.0
+
+                    for i, params in enumerate(classifier_heads_params_list):
+                        if key in params:
+                            weight = data_sizes_list[i]
+                            weighted_sum += params[key].float() * weight
+                            total_weight += weight
+                    
+                    if total_weight > 0:
+                        aggregated_params[key] = weighted_sum / total_weight
+                    else:
+                        aggregated_params[key] = classifier_heads_params_list[0][key]
+
+                # Create cluster classifier
+                if hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                    cluster_head = copy.deepcopy(self.global_model.head)
+                    try:
+                        cluster_head.load_state_dict(aggregated_params)
+                        self.cluster_classifiers[k_idx] = cluster_head
+                    except RuntimeError as e:
+                        print(f"VWC: Error loading aggregated state_dict for cluster {k_idx}: {e}. Using global head.")
+                        self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
+                else:
+                    self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
+            else:
+                # No classifier heads found, use global head
+                if hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                    self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
+
+        print(f"VWC: Label-wise clustering complete. Assignments: {self.client_cluster_assignments}")
+        print(f"VWC: {len(cluster_centroids_vk_dicts)} clusters created with {len(self.cluster_classifiers)} cluster classifiers.")
+
+    def aggregate_parameters(self):
+        """
+        Aggregates feature extractors from selected clients to update the global model's feature extractor.
+        Also aggregates a global classifier head from received client classifier parameters.
+        Cluster-specific classifiers are handled in run_vwc_clustering.
+        """
+        if not self.selected_clients:
+            # print("FedDCA: No selected clients for parameter aggregation.")
+            return
+
+        # 1. Aggregate Feature Extractors
+        uploaded_feature_extractor_state_dicts = []
+        feature_extractor_weights = []
+
+        for client in self.selected_clients:
+            client_model_fe_module = _get_feature_extractor_module_from_model(client.model)
+            if client_model_fe_module:
+                uploaded_feature_extractor_state_dicts.append(copy.deepcopy(client_model_fe_module.state_dict()))
+                feature_extractor_weights.append(client.train_samples)
+            # else:
+                # print(f"FedDCA Warning: Could not get feature extractor from client {client.id} for aggregation.")
+
+        if uploaded_feature_extractor_state_dicts:
+            total_fe_weight = sum(feature_extractor_weights)
+            if total_fe_weight > 0:
+                norm_fe_weights = [w / total_fe_weight for w in feature_extractor_weights]
+                
+                # Initialize aggregated_fe_params from the first one
+                aggregated_fe_params = copy.deepcopy(uploaded_feature_extractor_state_dicts[0])
+                for key in aggregated_fe_params:
+                    aggregated_fe_params[key].zero_()
+
+                for fe_state_dict, weight in zip(uploaded_feature_extractor_state_dicts, norm_fe_weights):
+                    for key in aggregated_fe_params:
+                        if key in fe_state_dict:
+                            aggregated_fe_params[key] += fe_state_dict[key] * weight
+                
+                global_model_fe_module = _get_feature_extractor_module_from_model(self.global_model)
+                if global_model_fe_module:
+                    try:
+                        global_model_fe_module.load_state_dict(aggregated_fe_params)
+                    except RuntimeError as e:
+                        # print(f"FedDCA: Error loading aggregated feature extractor params (strict=True): {e}. Trying strict=False.")
+                        try:
+                            global_model_fe_module.load_state_dict(aggregated_fe_params, strict=False)
+                        except Exception as e_false:
+                            # print(f"FedDCA: Error loading aggregated feature extractor params (strict=False): {e_false}")
+                            pass # Or handle more gracefully
+                # else:
+                    # print("FedDCA Warning: Could not identify global model's feature extractor to load aggregated params.")
+            # else:
+                # print("FedDCA: Total weight for feature extractor aggregation is zero. Skipping FE update.")
+        # else:
+            # print("FedDCA: No feature extractors collected for aggregation. Global feature extractor not updated.")
+
+        # 2. Aggregate a Global Classifier Head for self.global_model.head
+        if not self.client_classifier_params:
+            # print("FedDCA: No client classifier parameters received for global head aggregation.")
+            return # Return if no classifier params, FE might have been updated.
+
+        if hasattr(self.global_model, 'head') and self.global_model.head is not None:
+            aggregated_clf_params_state_dict = None
+            first_valid_head_state_dict = None
+            
+            # Find the first valid head to determine keys and initialize structure
+            for cid_temp in self.client_classifier_params:
+                if self.client_classifier_params[cid_temp]: # Check if state_dict is not empty
+                    first_valid_head_state_dict = self.client_classifier_params[cid_temp]
+                    break
+            
+            if first_valid_head_state_dict:
+                # Initialize with zeros, same keys and device as the first valid head
+                aggregated_clf_params_state_dict = {
+                    k: torch.zeros_like(v, device=v.device) 
+                    for k, v in first_valid_head_state_dict.items()
+                }
+                total_clf_weight = 0.0
+                
+                # Build a map for client train_samples lookup
+                client_train_samples_map = {c.id: c.train_samples for c in self.clients}
+
+                for client_id, clf_state_dict in self.client_classifier_params.items():
+                    if clf_state_dict: # if state_dict is not empty
+                        weight = client_train_samples_map.get(client_id, 1.0) # Default weight 1.0
+                        
+                        for key in aggregated_clf_params_state_dict:
+                            if key in clf_state_dict: # Ensure key exists in current client's head
+                                # Ensure tensors are on the same device before aggregation
+                                # self.client_classifier_params should store CPU tensors as per clientDCA
+                                aggregated_clf_params_state_dict[key] += clf_state_dict[key].to(aggregated_clf_params_state_dict[key].device) * weight
+                        total_clf_weight += weight
+                
+                if total_clf_weight > 0:
+                    for key in aggregated_clf_params_state_dict:
+                        aggregated_clf_params_state_dict[key] /= total_clf_weight
+                    
+                    try:
+                        self.global_model.head.load_state_dict(aggregated_clf_params_state_dict)
+                    except RuntimeError as e:
+                        # print(f"FedDCA: Error loading aggregated global classifier head params (strict=True): {e}. Trying strict=False.")
+                        try:
+                            self.global_model.head.load_state_dict(aggregated_clf_params_state_dict, strict=False)
+                        except Exception as e_false:
+                            # print(f"FedDCA: Error loading aggregated global classifier head params (strict=False): {e_false}")
+                            pass
+                # else:
+                    # print("FedDCA: Total weight for global classifier head aggregation is zero. Global head not updated.")
+            # else:
+                # print("FedDCA: No valid client classifier params found to initialize global head aggregation. Global head not updated.")
+        # else:
+            # print("FedDCA: Global model has no 'head' attribute, or it's None. Global head not updated.")
+
 
     def set_clf_keys(self, clf_keys):
         """Sets the classifier keys for the server."""
-        self.clf_keys = clf_keys
-        print(f"Server clf_keys set to: {self.clf_keys}")
-        
-    def generate_proxy_data_gmm(self, features, num_samples=100, min_components=1, max_components=5):
-        """
-        使用高斯混合模型(GMM)生成代理数据点
-        
-        参数:
-            features: 原始特征数据，形状为(n_samples, n_features)
-            num_samples: 要生成的代理数据点数量
-            min_components: GMM的最小组件数
-            max_components: GMM的最大组件数
-            
-        返回:
-            生成的代理数据点，形状为(num_samples, n_features)
-        """
-        try:
-            # 确保输入数据格式正确
-            if isinstance(features, torch.Tensor):
-                features = features.detach().cpu().numpy()
-                
-            if features.ndim == 1:
-                features = features.reshape(-1, 1)
-                
-            # 获取样本数和特征维度
-            n_samples, n_dim = features.shape
-            
-            # 如果样本数太少，直接使用Bootstrap采样
-            if n_samples < 3:
-                print(f"样本数({n_samples})过少，使用Bootstrap采样")
-                indices = np.random.choice(n_samples, size=num_samples, replace=True)
-                return features[indices]
-            
-            # 如果维度大于样本数，需要先降维
-            if n_dim > n_samples:
-                print(f"维度({n_dim})大于样本数({n_samples})，使用PCA降维")
-                try:
-                    # 降维到样本数-1维度，但至少保留2维
-                    target_dim = max(2, min(n_samples - 1, 20))  # 限制最大降维到20维
-                    pca = PCA(n_components=target_dim)
-                    features_reduced = pca.fit_transform(features)
-                    
-                    # 在降维空间中使用GMM
-                    gmm_samples = self.gmm_sample(features_reduced, num_samples, min_components, max_components)
-                    
-                    # 投影回原始空间
-                    samples = pca.inverse_transform(gmm_samples)
-                    return samples
-                    
-                except Exception as e:
-                    print(f"PCA降维或GMM失败: {str(e)}")
-                    # 失败时使用原始特征的Bootstrap采样
-                    indices = np.random.choice(n_samples, size=num_samples, replace=True)
-                    return features[indices]
-            
-            # 正常情况：直接使用GMM
-            return self.gmm_sample(features, num_samples, min_components, max_components)
-            
-        except Exception as e:
-            print(f"GMM处理完全失败: {str(e)}")
-            
-            # 最后的回退：直接返回原始特征或其Bootstrap采样
-            if len(features) >= num_samples:
-                return features[:num_samples]
-            else:
-                indices = np.random.choice(len(features), size=num_samples, replace=True)
-                return features[indices]
-
-    def gmm_sample(self, features, num_samples, min_components=1, max_components=5):
-        """
-        使用GMM生成样本
-        
-        参数:
-            features: 特征数据
-            num_samples: 要生成的样本数量
-            min_components, max_components: GMM组件数范围
-        """
-        n_samples = features.shape[0]
-        
-        # 动态确定组件数量，但不超过样本数的一半
-        n_components = min(max_components, max(min_components, n_samples // 4))
-        
-        # 使用BIC准则选择最佳的组件数
-        best_gmm = None
-        best_bic = np.inf
-        
-        # 在合理范围内尝试不同的组件数
-        for n_comp in range(min_components, min(n_components + 1, n_samples // 2 + 1)):
-            try:
-                gmm = GaussianMixture(
-                    n_components=n_comp,
-                    covariance_type='full',  # 使用完全协方差矩阵以捕获特征间相关性
-                    random_state=42,
-                    reg_covar=1e-3  # 添加正则化以增加数值稳定性
-                )
-                gmm.fit(features)
-                bic = gmm.bic(features)
-                
-                if bic < best_bic:
-                    best_bic = bic
-                    best_gmm = gmm
-            except Exception as e:
-                print(f"GMM拟合失败(n_comp={n_comp}): {str(e)}")
-                continue
-        
-        # 如果所有组件数都失败，使用简单的单组件GMM
-        if best_gmm is None:
-            try:
-                best_gmm = GaussianMixture(
-                    n_components=1,
-                    covariance_type='diag',  # 使用对角协方差矩阵，更简单更稳定
-                    random_state=42,
-                    reg_covar=1e-2  # 更强的正则化
-                )
-                best_gmm.fit(features)
-            except Exception as e:
-                print(f"单组件GMM拟合失败: {str(e)}")
-                # 如果GMM完全失败，回退到Bootstrap
-                indices = np.random.choice(n_samples, size=num_samples, replace=True)
-                return features[indices]
-        
-        # 使用拟合好的GMM生成样本
-        try:
-            samples, _ = best_gmm.sample(num_samples)
-            return samples
-        except Exception as e:
-            print(f"GMM采样失败: {str(e)}")
-            # 采样失败时使用Bootstrap
-            indices = np.random.choice(n_samples, size=num_samples, replace=True)
-            return features[indices]
