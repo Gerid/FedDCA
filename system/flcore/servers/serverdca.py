@@ -1,18 +1,24 @@
-import copy
+import time
+import os
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-import random
-import time
-import traceback # For detailed error logging
-# Removed: from sklearn.mixture import GaussianMixture
-# Removed: from sklearn.cluster import DBSCAN 
-import ot # Python Optimal Transport library
-# from scipy.stats import multivariate_normal # For GMM sampling if needed, or use np.random.multivariate_normal
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import ot
+import copy # Added for deepcopying profiles if needed
+import random # Added to resolve NameError
+from sklearn.cluster import KMeans # Added for run_vwc_clustering fallback
+
+# Added imports for comprehensive evaluation
+from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+from collections import Counter # For purity calculation
+import json # For saving evaluation report
+
+import wandb # Added for global access, complemented by try-except in __init__
 
 from flcore.servers.serverbase import Server
 from flcore.clients.clientdca import clientDCA # Ensure clientDCA is imported
-# ... other necessary imports ...
 
 # Removed GMM-specific sampling. This function now directly computes Sinkhorn distance between two sets of samples.
 def compute_sinkhorn_distance_samples(samples1, samples2, reg=0.1):
@@ -152,17 +158,18 @@ class FedDCA(Server):
         self.args.load_pretrain = False 
 
         self.client_label_profiles = {} 
-        self.client_label_profiles_history = {} 
+        self.client_label_profiles_history = {} # User's existing attribute
         self.drift_threshold_wasserstein = args.drift_threshold_wasserstein if hasattr(args, 'drift_threshold_wasserstein') else 0.5 
         self.reduce_drifted_influence_factor = args.reduce_drifted_influence_factor if hasattr(args, 'reduce_drifted_influence_factor') else 1.0
-          # VWC specific attributes
+        
+        # VWC specific attributes from user's code
         self.vwc_reg = args.vwc_reg if hasattr(args, 'vwc_reg') else 0.1
         self.vwc_num_samples_dist = args.vwc_num_samples_dist if hasattr(args, 'vwc_num_samples_dist') else 500
         self.vwc_num_samples_bary = args.vwc_num_samples_bary if hasattr(args, 'vwc_num_samples_bary') else 500
         self.vwc_num_samples_concept = args.vwc_num_samples_concept if hasattr(args, 'vwc_num_samples_concept') else 30 
-        self.vwc_num_centroid_samples = args.vwc_num_centroid_samples if hasattr(args, 'vwc_num_centroid_samples') else 30
+        self.vwc_num_centroid_samples = args.vwc_num_centroid_samples if hasattr(args, 'vwc_num_centroid_samples') else 30 # User had this
         self.vwc_max_iter = args.vwc_max_iter if hasattr(args, 'vwc_max_iter') else 10
-        self.vwc_K_t = args.vwc_K_t if hasattr(args, 'vwc_K_t') else 3 
+        self.vwc_K_t = args.vwc_K_t if hasattr(args, 'vwc_K_t') else 3 # User's default for K_t
         self.vwc_drift_penalty_factor = args.vwc_drift_penalty_factor if hasattr(args, 'vwc_drift_penalty_factor') else 0.5
         self.vwc_potential_update_factor = args.vwc_potential_update_factor if hasattr(args, 'vwc_potential_update_factor') else self.vwc_reg 
         self.gmm_n_components_concept = args.gmm_n_components_concept if hasattr(args, 'gmm_n_components_concept') else 1
@@ -172,55 +179,131 @@ class FedDCA(Server):
 
         self.cluster_classifiers = {}  
         self.client_cluster_assignments = {}  
-        
+        self.client_drift_status = {} # From user's perform_drift_analysis_and_adaptation
+        self.client_classifier_params = {} # From user's receive_client_updates
+
         self.clf_keys = [] 
         if hasattr(args.model, 'head') and args.model.head is not None:
-            self.clf_keys = list(args.model.head.state_dict().keys())
+            self.clf_keys = list(args.model.head.state_dict().keys()) # Completed this line
         
         self.Budget = []
-        self.current_round = 0 
+        # self.current_round = 0 # Initialized in ServerBase
+
+        # Comprehensive evaluation system initialization
+        self.evaluation_metrics = {
+            'clustering_quality': {
+                'ari_history': [], 'nmi_history': [], 'purity_history': [],
+            },
+            'communication_efficiency': {
+                'upload_bytes_per_round': [], 'download_bytes_per_round': [],
+                'avg_client_compute_time_per_round': [], 'server_compute_time_per_round': []
+            },
+            'fairness_metrics': {
+                'accuracy_std_per_round': [], 'worst_client_accuracy_per_round': [],
+                'client_accuracies_history': {} # Dict[round, List[acc]]
+            }
+        }
+        self.true_client_concepts = {}  # Dict[client_id, concept_id] for clustering eval
+        
+        # For current round's detailed communication tracking
+        self.bytes_tracker = { 
+            'upload_per_client': {}, 'download_per_client': {},
+            'total_upload_this_round': 0, 'total_download_this_round': 0
+        }
+        
+        # Wandb setup
+        if self.args.use_wandb:
+            try:
+                import wandb # Ensure wandb is imported here
+            except ImportError:
+                print("wandb not installed, proceeding without it.")
+                self.args.use_wandb = False
 
     def train(self):
         for i in range(self.global_rounds + 1):
             self.current_round = i
+            self._init_round_tracking()  # Initialize round-specific trackers
+            self._load_ground_truth_concepts()  # Load true client concepts
+
+            server_compute_time_this_round = 0
+
             self.selected_clients = self.select_clients()
-            self.send_models() 
+            
+            send_models_start_time = time.time()
+            self.send_models()
+            server_compute_time_this_round += (time.time() - send_models_start_time)
 
-            if i % self.eval_gap == 0:
-                print(f"\n-------------Round number: {i}--------------")
-                print("Evaluate global model")
-                self.evaluate()
-
+            client_compute_times_this_round = []
             for client in self.selected_clients:
-                client.train() 
+                client_train_start_time = time.time()
+                client.train()
+                client_compute_times_this_round.append(time.time() - client_train_start_time)
             
+            if client_compute_times_this_round:
+                avg_client_compute_time = sum(client_compute_times_this_round) / len(client_compute_times_this_round)
+                self.evaluation_metrics['communication_efficiency']['avg_client_compute_time_per_round'].append(avg_client_compute_time)
+            else:
+                self.evaluation_metrics['communication_efficiency']['avg_client_compute_time_per_round'].append(0)
+
+            receive_updates_start_time = time.time()
             self.receive_client_updates()
-            self.perform_drift_analysis_and_adaptation()
+            server_compute_time_this_round += (time.time() - receive_updates_start_time)
             
-            current_K_t = self.vwc_K_t 
-            if len(self.client_label_profiles) > 0 :
-                 self.run_vwc_clustering(self.client_label_profiles, self.client_drift_status, current_K_t)
+            op_start_time = time.time()
+            self.perform_drift_analysis_and_adaptation()
+            server_compute_time_this_round += (time.time() - op_start_time)
+            
+            op_start_time = time.time()
+            current_K_t = self.vwc_K_t
+            if len(self.client_label_profiles) > 0:
+                self.run_vwc_clustering(self.client_label_profiles, self.client_drift_status, current_K_t)
             else:
                 print("No client profiles received, skipping VWC clustering.")
-                for client_obj in self.selected_clients: 
-                    self.client_cluster_assignments[client_obj.id] = 0
+                for client_obj in self.selected_clients:
+                    self.client_cluster_assignments[client_obj.id] = 0  # Default assignment
+            server_compute_time_this_round += (time.time() - op_start_time)
 
+            op_start_time = time.time()
             self.aggregate_parameters()
+            server_compute_time_this_round += (time.time() - op_start_time)
             
+            self.evaluation_metrics['communication_efficiency']['server_compute_time_per_round'].append(server_compute_time_this_round)
+
+            # Comprehensive evaluation
+            if i % self.eval_gap == 0 and i > 0: # Avoid evaluation at round 0 if not meaningful
+                print(f"\\n-------------Round number: {i}--------------")
+                self._comprehensive_evaluation()
+
+            # Original evaluate call (can be removed if _comprehensive_evaluation covers it)
+            # if i % self.eval_gap == 0:
+            #     print(f"\\n-------------Round number: {i}--------------")
+            #     print("Evaluate global model") # This is ServerBase.evaluate()
+            #     self.evaluate() 
+
+
             # if hasattr(self, 'learning_rate_scheduler') and self.learning_rate_scheduler is not None:
             #     self.learning_rate_scheduler.step()
 
-        print("\nFinal Global Trainning accuracy:")
-        self.print_(max(self.rs_train_acc), max(self.rs_train_loss))
-        print("\nFinal Global Test accuracy:")
-        self.print_(max(self.rs_test_acc), max(self.rs_global_test_acc), max(self.rs_test_auc))
+        # End of training loop
+        self._generate_final_evaluation_report()
 
-        self.save_results()
+        # Original final print statements (can be removed if covered by the report)
+        # print("\\nFinal Global Trainning accuracy:")
+        # if self.rs_train_acc: self.print_(max(self.rs_train_acc), max(self.rs_train_loss))
+        # print("\\nFinal Global Test accuracy:")
+        # if self.rs_test_acc: self.print_(max(self.rs_test_acc), max(self.rs_global_test_acc), max(self.rs_test_auc))
+
+        self.save_results() # ServerBase method
         self.save_global_model()
 
     def send_models(self):
         if not self.selected_clients:
             return
+
+        # Reset download bytes for this round for selected clients
+        for client in self.selected_clients:
+            self.bytes_tracker['download_per_client'][client.id] = 0
+        self.bytes_tracker['total_download_this_round'] = 0
 
         feature_extractor_params = None
         if hasattr(self.global_model, 'base') and self.global_model.base is not None:
@@ -229,43 +312,65 @@ class FedDCA(Server):
              feature_extractor_params = {k: v.cpu() for k, v in self.global_model.body.state_dict().items()}
         else: 
             print("Warning: Could not determine feature extractor from global_model for sending.")
-            feature_extractor_params = {k: v.cpu() for k, v in self.global_model.state_dict().items()} 
+            feature_extractor_params = {k: v.cpu() for k, v in self.global_model.state_dict().items()}
+
+        fe_size_bytes = self._calculate_model_size_from_state_dict(feature_extractor_params)
 
         for client in self.selected_clients:
             client.set_parameters(feature_extractor_params, part='feature_extractor')
+            self._track_communication_bytes(client.id, fe_size_bytes, 'download')
             
             cluster_id = self.client_cluster_assignments.get(client.id)
+            classifier_params_to_send = None
             if cluster_id is not None and cluster_id in self.cluster_classifiers:
-                classifier_params = {k: v.cpu() for k, v in self.cluster_classifiers[cluster_id].state_dict().items()}
-                client.set_parameters(classifier_params, part='classifier')
-            else:
-                if hasattr(self.global_model, 'head') and self.global_model.head is not None:
-                    default_classifier_params = {k: v.cpu() for k, v in self.global_model.head.state_dict().items()}
-                    client.set_parameters(default_classifier_params, part='classifier')
+                classifier_params_to_send = {k: v.cpu() for k, v in self.cluster_classifiers[cluster_id].state_dict().items()}
+            elif hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                classifier_params_to_send = {k: v.cpu() for k, v in self.global_model.head.state_dict().items()}
+            
+            if classifier_params_to_send:
+                client.set_parameters(classifier_params_to_send, part='classifier')
+                clf_size_bytes = self._calculate_model_size_from_state_dict(classifier_params_to_send)
+                self._track_communication_bytes(client.id, clf_size_bytes, 'download')
+            # else: client receives only FE if no relevant classifier found
 
     def receive_client_updates(self):
         self.client_label_profiles.clear()
-        self.client_feature_extractors_params = {} # Assuming this might be used elsewhere or for future features
-        self.client_classifier_params = {} # To store received classifier heads
+        # self.client_feature_extractors_params.clear() # Clearing this if it was populated by clients
+        self.client_classifier_params.clear()
+
+        # Reset upload bytes for this round for selected clients
+        for client in self.selected_clients:
+            self.bytes_tracker['upload_per_client'][client.id] = 0
+        self.bytes_tracker['total_upload_this_round'] = 0
 
         for client in self.selected_clients:
-            # lp_c_t is now expected to be: Dict[label, Tuple[np.ndarray_samples, np.ndarray_losses]]
-            # Ensure client.get_label_profiles() in clientdca.py returns this structure.
-            lp_c_t = client.get_label_profiles() 
+            lp_c_t = client.get_label_profiles()
             self.client_label_profiles[client.id] = lp_c_t
             
-            # Store history of label profiles (samples and losses)
+            # Estimate and track upload size for label profiles
+            profile_size_bytes = self._estimate_profile_size(lp_c_t)
+            self._track_communication_bytes(client.id, profile_size_bytes, 'upload')
+
             if client.id not in self.client_label_profiles_history:
                 self.client_label_profiles_history[client.id] = {}
-            # Use copy.deepcopy for mutable structures like dicts containing numpy arrays
             self.client_label_profiles_history[client.id][self.current_round] = copy.deepcopy(lp_c_t)
 
-            # Get classifier parameters from client
-            if hasattr(client, 'get_clf_parameters'): # Corrected method name
-                clf_params = client.get_clf_parameters() # Corrected method name
+            if hasattr(client, 'get_clf_parameters'):
+                clf_params = client.get_clf_parameters()
                 if clf_params:
-                    self.client_classifier_params[client.id] = clf_params            # else:
-            #     print(f"Warning: Client {client.id} does not have get_clf_parameters method.")
+                    self.client_classifier_params[client.id] = clf_params
+                    # Estimate and track upload size for classifier parameters
+                    # This assumes get_clf_parameters returns a state_dict or similar
+                    clf_param_size_bytes = self._calculate_model_size_from_state_dict(clf_params)
+                    self._track_communication_bytes(client.id, clf_param_size_bytes, 'upload')
+            
+            # If clients also send feature extractors (not typical in this FedDCA structure but for completeness):
+            # if hasattr(client, 'get_feature_extractor_parameters'):
+            #     fe_params = client.get_feature_extractor_parameters()
+            #     if fe_params:
+            #         # self.client_feature_extractors_params[client.id] = fe_params # If storing them
+            #         fe_param_size_bytes = self._calculate_model_size_from_state_dict(fe_params)
+            #         self._track_communication_bytes(client.id, fe_param_size_bytes, 'upload')
 
     def perform_drift_analysis_and_adaptation(self):
         self.client_drift_status = {} 
@@ -578,30 +683,46 @@ class FedDCA(Server):
 
                     for i, params in enumerate(classifier_heads_params_list):
                         if key in params:
-                            weight = data_sizes_list[i]
-                            weighted_sum += params[key].float() * weight
-                            total_weight += weight
+                            # Ensure the parameter tensor is on the CPU before adding
+                            param_tensor = params[key].cpu() if isinstance(params[key], torch.Tensor) else torch.tensor(params[key]).cpu()
+                            weighted_sum += param_tensor * data_sizes_list[i] # Use data_sizes_list for weights
+                            total_weight += data_sizes_list[i]
                     
                     if total_weight > 0:
                         aggregated_params[key] = weighted_sum / total_weight
                     else:
-                        aggregated_params[key] = classifier_heads_params_list[0][key]
+                        # Fallback if total_weight is zero (e.g. all data_sizes are 0)
+                        aggregated_params[key] = classifier_heads_params_list[0][key].cpu() if isinstance(classifier_heads_params_list[0][key], torch.Tensor) else torch.tensor(classifier_heads_params_list[0][key]).cpu()
+
 
                 # Create cluster classifier
                 if hasattr(self.global_model, 'head') and self.global_model.head is not None:
                     cluster_head = copy.deepcopy(self.global_model.head)
                     try:
+                        # Ensure aggregated_params are on the same device as cluster_head's parameters
+                        # This might not be strictly necessary if cluster_head is always on CPU after deepcopy
+                        # but good practice if devices can vary.
+                        # For simplicity, assuming cluster_head is on CPU.
+                        # If cluster_head could be on GPU, would need:
+                        # device = next(cluster_head.parameters()).device
+                        # aggregated_params_on_device = {k: v.to(device) for k, v in aggregated_params.items()}
+                        # cluster_head.load_state_dict(aggregated_params_on_device)
                         cluster_head.load_state_dict(aggregated_params)
                         self.cluster_classifiers[k_idx] = cluster_head
                     except RuntimeError as e:
-                        print(f"VWC: Error loading aggregated state_dict for cluster {k_idx}: {e}. Using global head.")
+                        print(f"VWC: Error loading state dict for cluster {k_idx} classifier: {e}")
+                        # Fallback to global head if loading fails
                         self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
                 else:
-                    self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
-            else:
-                # No classifier heads found, use global head
-                if hasattr(self.global_model, 'head') and self.global_model.head is not None:
-                    self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
+                    # Fallback if global_model has no head (should not happen if initialized correctly)
+                    # Or if creating a new head from scratch is preferred here
+                    print(f"VWC: Warning - global_model.head not found for cluster {k_idx}. Using a fresh copy (if possible).")
+                    # This case might need a more robust way to create a default head if self.global_model.head is None
+                    if hasattr(self.global_model, 'head') and self.global_model.head is not None: # Redundant check, but safe
+                         self.cluster_classifiers[k_idx] = copy.deepcopy(self.global_model.head)
+                    # else:
+                        # Consider creating a new nn.Linear layer if the structure is known
+                        # self.cluster_classifiers[k_idx] = nn.Linear(...) # Requires knowing input/output features
 
         print(f"VWC: Label-wise clustering complete. Assignments: {self.client_cluster_assignments}")
         print(f"VWC: {len(cluster_centroids_vk_dicts)} clusters created with {len(self.cluster_classifiers)} cluster classifiers.")
@@ -684,7 +805,7 @@ class FedDCA(Server):
                 }
                 total_clf_weight = 0.0
                 
-                # Build a map for client train_samples lookup
+                # Build a map for client_train_samples lookup
                 client_train_samples_map = {c.id: c.train_samples for c in self.clients}
 
                 for client_id, clf_state_dict in self.client_classifier_params.items():
@@ -721,3 +842,313 @@ class FedDCA(Server):
 
     def set_clf_keys(self, clf_keys):
         """Sets the classifier keys for the server."""
+        self.clf_keys = clf_keys
+
+    # Helper and Evaluation methods for FedDCA
+    def _init_round_tracking(self):
+        """Initializes/resets trackers for the current round (e.g., communication bytes)."""
+        self.bytes_tracker = { 
+            'upload_per_client': {client.id: 0 for client in self.selected_clients},
+            'download_per_client': {client.id: 0 for client in self.selected_clients},
+            'total_upload_this_round': 0,
+            'total_download_this_round': 0
+        }
+
+    def _load_ground_truth_concepts(self):
+        """Loads or updates the true concept IDs for each client.
+        This is a placeholder. In a real scenario, this might involve reading from a file 
+        or using information from a drift simulation environment.
+        For now, it assumes clients have a 'current_concept_id' attribute.
+        """
+        self.true_client_concepts.clear()
+        for client in self.clients: # Iterate over all clients, not just selected
+            if hasattr(client, 'current_concept_id'):
+                self.true_client_concepts[client.id] = client.current_concept_id
+            # else:
+            #     print(f"Warning: Client {client.id} does not have current_concept_id for ground truth.")
+
+    def _calculate_model_size_from_state_dict(self, state_dict):
+        """Calculates the size of a model's state_dict in bytes."""
+        if not state_dict: return 0
+        size_bytes = 0
+        for param_tensor in state_dict.values():
+            if isinstance(param_tensor, torch.Tensor):
+                size_bytes += param_tensor.element_size() * param_tensor.nelement()
+        return size_bytes
+
+    def _estimate_profile_size(self, label_profile):
+        """Estimates the size of a client's label profile in bytes.
+        label_profile: Dict[label, Tuple[np.ndarray_samples, np.ndarray_losses]]
+        """
+        if not label_profile: return 0
+        size_bytes = 0
+        for label, (samples, losses) in label_profile.items():
+            if samples is not None:
+                size_bytes += samples.nbytes
+            if losses is not None:
+                size_bytes += losses.nbytes
+        # Add overhead for dictionary structure, keys, etc. (rough estimate)
+        size_bytes += len(label_profile) * (np.dtype(int).itemsize + 2 * np.dtype(np.intp).itemsize) # For keys and tuple pointers
+        return size_bytes
+
+    def _track_communication_bytes(self, client_id, num_bytes, direction):
+        """Tracks communication bytes for a client and the round total.
+        direction: 'upload' or 'download'
+        """
+        if direction == 'upload':
+            self.bytes_tracker['upload_per_client'][client_id] = self.bytes_tracker['upload_per_client'].get(client_id, 0) + num_bytes
+            self.bytes_tracker['total_upload_this_round'] += num_bytes
+        elif direction == 'download':
+            self.bytes_tracker['download_per_client'][client_id] = self.bytes_tracker['download_per_client'].get(client_id, 0) + num_bytes
+            self.bytes_tracker['total_download_this_round'] += num_bytes
+
+    def _calculate_purity(self, y_true, y_pred):
+        """Calculates clustering purity."""
+        contingency_matrix = Counter()
+        for true, pred in zip(y_true, y_pred):
+            contingency_matrix[(true, pred)] += 1
+
+        cluster_dominant_counts = {}
+        for (true_label, cluster_label), count in contingency_matrix.items():
+            if cluster_label not in cluster_dominant_counts:
+                cluster_dominant_counts[cluster_label] = {}
+            if true_label not in cluster_dominant_counts[cluster_label]:
+                cluster_dominant_counts[cluster_label][true_label] = 0
+            cluster_dominant_counts[cluster_label][true_label] += count
+
+        correct_assignments = 0
+        for cluster_label in cluster_dominant_counts:
+            if cluster_dominant_counts[cluster_label]: # Check if dict is not empty
+                correct_assignments += max(cluster_dominant_counts[cluster_label].values())
+        
+        return correct_assignments / len(y_true) if len(y_true) > 0 else 0
+
+    def _evaluate_clustering_quality(self):
+        """Evaluates clustering quality using ARI, NMI, and Purity."""
+        if not self.client_cluster_assignments or not self.true_client_concepts:
+            # print("Evaluation: Not enough data for clustering quality assessment.")
+            return None, None, None
+
+        # Align true_labels and pred_labels based on common client IDs present in assignments
+        # This is crucial if not all clients participated or have ground truth
+        client_ids_in_assignments = list(self.client_cluster_assignments.keys())
+        
+        true_labels_list = []
+        pred_labels_list = []
+
+        for cid in client_ids_in_assignments:
+            if cid in self.true_client_concepts:
+                true_labels_list.append(self.true_client_concepts[cid])
+                pred_labels_list.append(self.client_cluster_assignments[cid])
+            # else:
+            #     print(f"Warning: Client {cid} in assignments but not in true_client_concepts.")
+
+        if not true_labels_list or len(true_labels_list) < 2: # Metrics require at least 2 samples
+            # print("Evaluation: Not enough common clients with ground truth for clustering metrics.")
+            return 0, 0, 0 # Return default values if not enough data
+
+        # Ensure all labels are integers for scikit-learn metrics
+        try:
+            true_labels_np = np.array(true_labels_list, dtype=int)
+            pred_labels_np = np.array(pred_labels_list, dtype=int)
+        except ValueError as e:
+            print(f"Error converting labels to int for clustering metrics: {e}")
+            return 0,0,0
+
+        ari = adjusted_rand_score(true_labels_np, pred_labels_np)
+        nmi = normalized_mutual_info_score(true_labels_np, pred_labels_np)
+        purity = self._calculate_purity(true_labels_np, pred_labels_np)
+        
+        self.evaluation_metrics['clustering_quality']['ari_history'].append(ari)
+        self.evaluation_metrics['clustering_quality']['nmi_history'].append(nmi)
+        self.evaluation_metrics['clustering_quality']['purity_history'].append(purity)
+        
+        return ari, nmi, purity
+
+    def _evaluate_communication_efficiency(self):
+        """Stores current round's communication and timing metrics."""
+        # Byte tracking is now done per round and stored directly in train loop
+        self.evaluation_metrics['communication_efficiency']['upload_bytes_per_round'].append(self.bytes_tracker['total_upload_this_round'])
+        self.evaluation_metrics['communication_efficiency']['download_bytes_per_round'].append(self.bytes_tracker['total_download_this_round'])
+        # Client and server compute times are appended in the train loop
+        return self.bytes_tracker['total_upload_this_round'], self.bytes_tracker['total_download_this_round']
+
+    def _get_current_client_accuracies(self):
+        """Collects test accuracies from selected clients."""
+        client_accuracies = []
+        # Evaluate on ALL clients that are part of the system, not just selected ones for this round,
+        # to get a more representative view of fairness across the whole population.
+        # However, ensure these clients have up-to-date models if they weren't selected.
+        # For simplicity here, we iterate through self.clients (all clients known to server)
+        # and assume they can run test_metrics() with their current state.
+        # A more robust approach might involve sending the latest relevant models to non-selected clients
+        # before calling test_metrics, or only evaluating on currently selected_clients.
+        # Let's stick to selected_clients for now to ensure models are current for evaluation.
+
+        clients_to_evaluate = self.selected_clients # Or self.clients for a broader view
+        if not clients_to_evaluate:
+            return []
+
+        for client in clients_to_evaluate:
+            # Ensure client has the correct model (feature extractor + cluster-specific classifier)
+            # This should already be handled by send_models before client.train()
+            # If evaluating clients not in self.selected_clients, model update would be needed here.
+            test_acc, _, _ = client.test_metrics() # Assumes test_metrics returns (acc, num_samples, auc)
+            client_accuracies.append(test_acc)
+        return client_accuracies
+
+    def _evaluate_fairness_metrics(self):
+        """Evaluates fairness metrics like accuracy standard deviation and worst-client performance."""
+        client_accuracies = self._get_current_client_accuracies()
+        
+        if not client_accuracies:
+            # print("Evaluation: No client accuracies available for fairness metrics.")
+            # Append default/NaN values if no accuracies
+            self.evaluation_metrics['fairness_metrics']['accuracy_std_per_round'].append(float('nan'))
+            self.evaluation_metrics['fairness_metrics']['worst_client_accuracy_per_round'].append(float('nan'))
+            self.evaluation_metrics['fairness_metrics']['client_accuracies_history'][self.current_round] = []
+            return float('nan'), float('nan')
+
+        acc_std = np.std(client_accuracies) if len(client_accuracies) > 1 else 0.0
+        worst_acc = np.min(client_accuracies) if client_accuracies else float('nan')
+        
+        self.evaluation_metrics['fairness_metrics']['accuracy_std_per_round'].append(acc_std)
+        self.evaluation_metrics['fairness_metrics']['worst_client_accuracy_per_round'].append(worst_acc)
+        self.evaluation_metrics['fairness_metrics']['client_accuracies_history'][self.current_round] = client_accuracies
+            
+        return acc_std, worst_acc
+
+    def _comprehensive_evaluation(self):
+        """Orchestrates the comprehensive evaluation for the current round."""
+        print(f"--- Comprehensive Evaluation for Round {self.current_round} ---")
+        
+        # 1. Clustering Quality
+        ari, nmi, purity = self._evaluate_clustering_quality()
+        if ari is not None: # Check if metrics were computed
+            print(f"  Clustering: ARI={ari:.4f}, NMI={nmi:.4f}, Purity={purity:.4f}")
+            if self.args.use_wandb and wandb.run:
+                wandb.log({"Round": self.current_round, "ARI": ari, "NMI": nmi, "Purity": purity})
+
+        # 2. Communication Efficiency (metrics are already stored in train loop)
+        upload_bytes = self.bytes_tracker['total_upload_this_round']
+        download_bytes = self.bytes_tracker['total_download_this_round']
+        avg_client_time = self.evaluation_metrics['communication_efficiency']['avg_client_compute_time_per_round'][-1] if self.evaluation_metrics['communication_efficiency']['avg_client_compute_time_per_round'] else 0
+        server_time = self.evaluation_metrics['communication_efficiency']['server_compute_time_per_round'][-1] if self.evaluation_metrics['communication_efficiency']['server_compute_time_per_round'] else 0
+        print(f"  Comm & Compute: Upload={upload_bytes} B, Download={download_bytes} B, AvgClientTime={avg_client_time:.2f}s, ServerTime={server_time:.2f}s")
+        if self.args.use_wandb and wandb.run:
+            wandb.log({
+                "Round": self.current_round, 
+                "UploadBytes": upload_bytes, "DownloadBytes": download_bytes,
+                "AvgClientComputeTime": avg_client_time, "ServerComputeTime": server_time
+            })
+
+        # 3. Fairness and Performance Consistency
+        acc_std, worst_acc = self._evaluate_fairness_metrics()
+        if not np.isnan(acc_std):
+            print(f"  Fairness: Acc_StdDev={acc_std:.4f}, WorstClientAcc={worst_acc:.4f}")
+            if self.args.use_wandb and wandb.run:
+                wandb.log({"Round": self.current_round, "AccuracyStdDev": acc_std, "WorstClientAccuracy": worst_acc})
+                # Log accuracy distribution if needed (e.g., histogram)
+                # client_accs_this_round = self.evaluation_metrics['fairness_metrics']['client_accuracies_history'].get(self.current_round, [])
+                # if client_accs_this_round:
+                #     wandb.log({"ClientAccuracyDistribution_Round"+str(self.current_round): wandb.Histogram(client_accs_this_round)})
+
+        # 4. Drift Adaptation Capability (Placeholder for future metrics)
+        # print(f"  Drift Adaptation: ... (Metrics TBD) ...")
+        # if self.args.use_wandb and wandb.run:
+        #     wandb.log({"Round": self.current_round, "DriftMetric1": 0.0})
+
+        print("-----------------------------------------------------")
+
+    def _generate_final_evaluation_report(self):
+        """Generates and prints/saves a final summary of all evaluations."""
+        print("\n=============== Final Evaluation Report ===============")
+        
+        # Clustering Quality Summary
+        print("\n--- Clustering Quality ---")
+        if self.evaluation_metrics['clustering_quality']['ari_history']:
+            avg_ari = np.mean(self.evaluation_metrics['clustering_quality']['ari_history'])
+            avg_nmi = np.mean(self.evaluation_metrics['clustering_quality']['nmi_history'])
+            avg_purity = np.mean(self.evaluation_metrics['clustering_quality']['purity_history'])
+            print(f"  Average ARI: {avg_ari:.4f}")
+            print(f"  Average NMI: {avg_nmi:.4f}")
+            print(f"  Average Purity: {avg_purity:.4f}")
+        else:
+            print("  No clustering quality data recorded.")
+
+        # Communication Efficiency Summary
+        print("\n--- Communication & Computational Efficiency ---")
+        if self.evaluation_metrics['communication_efficiency']['upload_bytes_per_round']:
+            total_upload = np.sum(self.evaluation_metrics['communication_efficiency']['upload_bytes_per_round'])
+            total_download = np.sum(self.evaluation_metrics['communication_efficiency']['download_bytes_per_round'])
+            avg_round_client_time = np.mean(self.evaluation_metrics['communication_efficiency']['avg_client_compute_time_per_round'])
+            avg_round_server_time = np.mean(self.evaluation_metrics['communication_efficiency']['server_compute_time_per_round'])
+            print(f"  Total Upload Bytes: {total_upload}")
+            print(f"  Total Download Bytes: {total_download}")
+            print(f"  Average Client Compute Time per Round: {avg_round_client_time:.2f}s")
+            print(f"  Average Server Compute Time per Round: {avg_round_server_time:.2f}s")
+        else:
+            print("  No communication/computation efficiency data recorded.")
+
+        # Fairness Metrics Summary
+        print("\n--- Fairness & Performance Consistency ---")
+        if self.evaluation_metrics['fairness_metrics']['accuracy_std_per_round']:
+            avg_acc_std = np.nanmean(self.evaluation_metrics['fairness_metrics']['accuracy_std_per_round'])
+            avg_worst_acc = np.nanmean(self.evaluation_metrics['fairness_metrics']['worst_client_accuracy_per_round'])
+            print(f"  Average Accuracy StdDev: {avg_acc_std:.4f}")
+            print(f"  Average Worst-Client Accuracy: {avg_worst_acc:.4f}")
+
+            # Save fairness boxplot
+            all_rounds_client_accs = [accs for r, accs in self.evaluation_metrics['fairness_metrics']['client_accuracies_history'].items() if accs]
+            if all_rounds_client_accs:
+                try:
+                    plt.figure(figsize=(10, 6))
+                    # We need to decide how to present this. Boxplot of accuracies from LAST round? Or average per client?
+                    # For now, let's plot the distribution of accuracies from the final recorded round with accuracies.
+                    final_round_accuracies = None
+                    for r in sorted(self.evaluation_metrics['fairness_metrics']['client_accuracies_history'].keys(), reverse=True):
+                        if self.evaluation_metrics['fairness_metrics']['client_accuracies_history'][r]:
+                            final_round_accuracies = self.evaluation_metrics['fairness_metrics']['client_accuracies_history'][r]
+                            break
+                    
+                    if final_round_accuracies:
+                        plt.boxplot(final_round_accuracies, vert=False)
+                        plt.title(f'Client Accuracy Distribution (Final Round with Data: {self.current_round if not final_round_accuracies else r})')
+                        plt.xlabel('Accuracy')
+                        plt.yticks([]) # No y-ticks as it's a single box for all clients in that round
+                        plot_filename = os.path.join(self.args.results_dir if hasattr(self.args, 'results_dir') else ".", "final_client_accuracy_distribution.png")
+                        plt.savefig(plot_filename)
+                        plt.close()
+                        print(f"  Client accuracy distribution plot saved to {plot_filename}")
+                    else:
+                        print("  Could not generate fairness boxplot: No per-round client accuracies recorded.")
+                except Exception as e:
+                    print(f"  Error generating fairness boxplot: {e}")
+        else:
+            print("  No fairness data recorded.")
+
+        # Save detailed evaluation metrics to JSON
+        report_filename = os.path.join(self.args.results_dir if hasattr(self.args, 'results_dir') else ".", "comprehensive_evaluation_report.json")
+        try:
+            with open(report_filename, 'w') as f:
+                # Convert numpy arrays to lists for JSON serialization
+                serializable_metrics = copy.deepcopy(self.evaluation_metrics)
+                for main_key, sub_dict in serializable_metrics.items():
+                    for metric_key, history_list in sub_dict.items():
+                        if isinstance(history_list, dict): # For client_accuracies_history
+                            for round_num, acc_list_in_round in history_list.items():
+                                if isinstance(acc_list_in_round, np.ndarray):
+                                    sub_dict[metric_key][round_num] = acc_list_in_round.tolist()
+                                elif isinstance(acc_list_in_round, list):
+                                    sub_dict[metric_key][round_num] = [float(x) if isinstance(x, (np.float32, np.float64)) else x for x in acc_list_in_round]
+                        elif isinstance(history_list, list):
+                            sub_dict[metric_key] = [float(x) if isinstance(x, (np.float32, np.float64, np.int32, np.int64)) else x for x in history_list]
+                            # Handle potential NaNs by converting them to None (JSON compatible)
+                            sub_dict[metric_key] = [None if isinstance(x, float) and np.isnan(x) else x for x in sub_dict[metric_key]]
+
+                json.dump(serializable_metrics, f, indent=4)
+            print(f"\nDetailed evaluation report saved to {report_filename}")
+        except Exception as e:
+            print(f"Error saving detailed evaluation report: {e}")
+
+        print("=====================================================")

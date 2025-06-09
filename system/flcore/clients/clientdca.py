@@ -92,6 +92,9 @@ class clientDCA(Client):
             self.previous_round_features = {}
             self.feature_history = {}
 
+            # Concept ID for ground truth clustering evaluation
+            self.current_concept_id = 0 # Default to 0, will be updated by drift simulation
+
         except AttributeError as e:
             print(f"Error initializing client {id}: Missing required attribute - {str(e)}")
             raise
