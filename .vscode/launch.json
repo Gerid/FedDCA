@@ -50,7 +50,11 @@
                 "20",
                 "--clustering_method",
                 "label_conditional",
-                // "--use_wandb",
+                "--use_wandb",
+                "-pv",
+                "2", 
+                "-t",
+                "1",
                 // "--save_global_model_to_wandb",
                 // "--save_results_to_wandb",
                 // "--simulate_drift", //Simulate data drift

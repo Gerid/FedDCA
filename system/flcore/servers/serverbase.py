@@ -300,10 +300,10 @@ class Server(object):
         return ids, num_samples, losses
 
     # evaluate selected clients
-    def evaluate(self, acc=None, loss=None, current_round=None): # Added current_round parameter
+    def evaluate(self, acc=None, loss=None, current_round=None, is_global=True, return_metrics=False): # Updated parameters
         stats = self.test_metrics()
         stats_train = self.train_metrics()
-
+        logging_prefix="Global" if is_global else "Local"
         test_acc = sum(stats[2])*1.0 / sum(stats[1]) if sum(stats[1]) > 0 else 0
         test_auc = sum(stats[3])*1.0 / sum(stats[1]) if sum(stats[1]) > 0 else 0
         train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1]) if sum(stats_train[1]) > 0 else 0
@@ -325,23 +325,29 @@ class Server(object):
         else:
             loss.append(train_loss)
 
-        print("Averaged Train Loss: {:.4f}".format(train_loss))
-        print("Averaged Test Accurancy: {:.4f}".format(test_acc))
-        print("Averaged Test AUC: {:.4f}".format(test_auc))
-        print("Std Test Accurancy: {:.4f}".format(std_test_acc))
-        print("Std Test AUC: {:.4f}".format(std_test_auc))
+        # Use logging_prefix in print statements
+        print(f"Averaged {logging_prefix} Train Loss: {train_loss:.4f}")
+        print(f"Averaged {logging_prefix} Test Accuracy: {test_acc:.4f}")
+        print(f"Averaged {logging_prefix} Test AUC: {test_auc:.4f}")
+        print(f"Std {logging_prefix} Test Accuracy: {std_test_acc:.4f}")
+        print(f"Std {logging_prefix} Test AUC: {std_test_auc:.4f}")
 
-        if wandb.run is not None:
-            try:
-                wandb.log({
-                    "Global Train Loss": train_loss,
-                    "Global Test Accuracy": test_acc,
-                    "Global Test AUC": test_auc,
-                    "Std Test Accuracy": std_test_acc,
-                    "Std Test AUC": std_test_auc
-                }, step=self.current_round)
-            except Exception as e:
-                print(f"Error logging metrics to wandb: {e}")
+        if hasattr(self.args, 'use_wandb') and self.args.use_wandb and wandb.run is not None:
+            if not return_metrics:  # Only log if return_metrics is False
+                try:
+                    log_step = current_round if current_round is not None else self.current_round
+                    wandb.log({
+                        f"{logging_prefix} Train Loss": train_loss,
+                        f"{logging_prefix} Test Accuracy": test_acc,
+                        f"{logging_prefix} Test AUC": test_auc,
+                        f"{logging_prefix} Std Test Accuracy": std_test_acc,
+                        f"{logging_prefix} Std Test AUC": std_test_auc
+                    }, step=log_step)
+                except Exception as e:
+                    print(f"Error logging metrics to wandb: {e}")
+
+        if return_metrics:
+            return test_acc, train_loss
 
     def print_(self, test_acc, test_auc, train_loss):
         print("Average Test Accurancy: {:.4f}".format(test_acc))
