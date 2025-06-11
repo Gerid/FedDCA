@@ -7,18 +7,18 @@ import torchvision
 import torchvision.transforms as transforms
 from utils.dataset_utils import check, separate_data, split_data, save_file
 
+
 random.seed(1)
 np.random.seed(1)
-# num_clients = 20 # Will be set in main
-# num_classes = 10 # Remains 10 for CIFAR-10
-# dir_path = "Cifar10/" # Will be set in main
+num_clients = 100
+dir_path = "Cifar10_100_clients/"
 
 
 # Allocate data to users
-def generate_cifar10(dir_path, num_clients, num_classes, niid, balance, partition):
+def generate_dataset(dir_path, num_clients, niid, balance, partition):
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
-        
+
     # Setup directory for train/test data
     config_path = dir_path + "config.json"
     train_path = dir_path + "train/"
@@ -26,7 +26,7 @@ def generate_cifar10(dir_path, num_clients, num_classes, niid, balance, partitio
 
     if check(config_path, train_path, test_path, num_clients, niid, balance, partition):
         return
-        
+
     # Get Cifar10 data
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
@@ -55,62 +55,24 @@ def generate_cifar10(dir_path, num_clients, num_classes, niid, balance, partitio
     dataset_image = np.array(dataset_image)
     dataset_label = np.array(dataset_label)
 
+    num_classes = len(set(dataset_label))
+    print(f'Number of classes: {num_classes}')
+
     # dataset = []
     # for i in range(num_classes):
     #     idx = dataset_label == i
     #     dataset.append(dataset_image[idx])
 
-    X, y, statistic = separate_data((dataset_image, dataset_label), num_clients, num_classes, 
-                                    niid, balance, partition)
+    X, y, statistic = separate_data((dataset_image, dataset_label), num_clients, num_classes,
+                                    niid, balance, partition, class_per_client=2)
     train_data, test_data = split_data(X, y)
-    save_file(config_path, train_path, test_path, train_data, test_data, num_clients, num_classes, 
-        statistic, niid, balance, partition)
+    save_file(config_path, train_path, test_path, train_data, test_data, num_clients, num_classes,
+              statistic, niid, balance, partition)
 
 
 if __name__ == "__main__":
-    # Default settings
-    num_clients_default = 100
-    num_classes_default = 10 # CIFAR-10 has 10 classes
-    niid_default = True
-    balance_default = False # Default to imbalanced
-    partition_default = "dir" # Default partition type
+    niid = True if sys.argv[1] == "noniid" else False
+    balance = True if sys.argv[2] == "balance" else False
+    partition = sys.argv[3] if sys.argv[3] != "-" else None
 
-    # Parse command line arguments
-    # Expected order: [script_name] [niid_status (noniid/iid)] [balance_status (balanced/imbalanced)] [partition_type (e.g., dir)] [num_clients]
-    
-    is_niid = niid_default
-    if len(sys.argv) > 1:
-        arg1_lower = sys.argv[1].lower()
-        if arg1_lower == "noniid":
-            is_niid = True
-        elif arg1_lower == "iid":
-            is_niid = False
-
-    is_balanced = balance_default
-    if len(sys.argv) > 2:
-        arg2_lower = sys.argv[2].lower()
-        if arg2_lower == "balanced":
-            is_balanced = True
-        elif arg2_lower == "imbalanced":
-            is_balanced = False
-            
-    partition_type = partition_default
-    if len(sys.argv) > 3 and sys.argv[3] != "-":
-        partition_type = sys.argv[3]
-
-    num_clients_to_generate = num_clients_default
-    if len(sys.argv) > 4 and sys.argv[4].isdigit():
-        num_clients_to_generate = int(sys.argv[4])
-
-    dynamic_dir_path = f"Cifar10_{num_clients_to_generate}_clients/"
-
-    print(f"--- Generating CIFAR-10 dataset with settings ---")
-    print(f"Data directory: {dynamic_dir_path}")
-    print(f"Client count: {num_clients_to_generate}")
-    print(f"Class count: {num_classes_default}")
-    print(f"NIID: {is_niid}")
-    print(f"Balanced: {is_balanced}")
-    print(f"Partition type: {partition_type}")
-    print(f"-----------------------------------------------")
-
-    generate_cifar10(dynamic_dir_path, num_clients_to_generate, num_classes_default, is_niid, is_balanced, partition_type)
+    generate_dataset(dir_path, num_clients, niid, balance, partition)
