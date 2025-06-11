@@ -10,9 +10,9 @@ from utils.dataset_utils import check, separate_data, split_data, save_file
 
 random.seed(1)
 np.random.seed(1)
-num_clients = 20
-num_classes = 10
-dir_path = "fmnist/"
+# num_clients = 20 # Will be set in main
+# num_classes = 10 # Remains 10 for FashionMNIST
+# dir_path = "fmnist/" # Will be set in main
 
 
 # Allocate data to users
@@ -69,8 +69,49 @@ def generate_fmnist(dir_path, num_clients, num_classes, niid, balance, partition
 
 
 if __name__ == "__main__":
-    niid = True if sys.argv[1] == "noniid" else False
-    balance = True if sys.argv[2] == "balance" else False
-    partition = sys.argv[3] if sys.argv[3] != "-" else None
+    # Default settings
+    num_clients_default = 100
+    num_classes_default = 10 # FashionMNIST has 10 classes
+    niid_default = True
+    balance_default = False # Default to imbalanced
+    partition_default = "dir" # Default partition type
 
-    generate_fmnist(dir_path, num_clients, num_classes, niid, balance, partition)
+    # Parse command line arguments
+    # Expected order: [script_name] [niid_status (noniid/iid)] [balance_status (balanced/imbalanced)] [partition_type (e.g., dir)] [num_clients]
+    
+    is_niid = niid_default
+    if len(sys.argv) > 1:
+        arg1_lower = sys.argv[1].lower()
+        if arg1_lower == "noniid":
+            is_niid = True
+        elif arg1_lower == "iid":
+            is_niid = False
+
+    is_balanced = balance_default
+    if len(sys.argv) > 2:
+        arg2_lower = sys.argv[2].lower()
+        if arg2_lower == "balanced":
+            is_balanced = True
+        elif arg2_lower == "imbalanced":
+            is_balanced = False
+            
+    partition_type = partition_default
+    if len(sys.argv) > 3 and sys.argv[3] != "-":
+        partition_type = sys.argv[3]
+
+    num_clients_to_generate = num_clients_default
+    if len(sys.argv) > 4 and sys.argv[4].isdigit():
+        num_clients_to_generate = int(sys.argv[4])
+
+    dynamic_dir_path = f"fmnist_{num_clients_to_generate}_clients/"
+
+    print(f"--- Generating FashionMNIST dataset with settings ---")
+    print(f"Data directory: {dynamic_dir_path}")
+    print(f"Client count: {num_clients_to_generate}")
+    print(f"Class count: {num_classes_default}")
+    print(f"NIID: {is_niid}")
+    print(f"Balanced: {is_balanced}")
+    print(f"Partition type: {partition_type}")
+    print(f"---------------------------------------------------")
+
+    generate_fmnist(dynamic_dir_path, num_clients_to_generate, num_classes_default, is_niid, is_balanced, partition_type)

@@ -8,12 +8,13 @@ from utils.dataset_utils import check, separate_data, split_data, save_file
 import random # For concept generation
 import sys # For __main__
 
-dir_path = "Cifar100/"
+# dir_path = "Cifar100/" # Will be set in main
 random.seed(1)
 np.random.seed(1)
 
 # Allocate data to users
-def generate_cifar100(data_dir, client_count, class_count, is_niid, is_balanced, partition_type):
+# def generate_cifar100(data_dir, client_count, class_count, is_niid, is_balanced, partition_type):
+def generate_cifar100(data_dir, client_count, class_count, is_niid, is_balanced, partition_type, class_per_client=20):
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
         
@@ -54,7 +55,7 @@ def generate_cifar100(data_dir, client_count, class_count, is_niid, is_balanced,
     dataset_label = np.array(dataset_label)
 
     X, y, statistic = separate_data((dataset_image, dataset_label), client_count, class_count, 
-                                    is_niid, is_balanced, partition_type, class_per_client=20)
+                                    is_niid, is_balanced, partition_type, class_per_client=class_per_client)
     train_data, test_data = split_data(X, y)
     save_file(config_path, train_path, test_path, train_data, test_data, client_count, class_count, 
         statistic, is_niid, is_balanced, partition_type)
@@ -324,39 +325,94 @@ class NumpyArrayEncoder(json.JSONEncoder):
         return super(NumpyArrayEncoder, self).default(o)
 
 if __name__ == "__main__":
+    # Default settings
+    num_clients_default = 100
+    class_count_default = 100 # CIFAR-100 has 100 classes
+    is_niid_default = True
+    is_balanced_default = False # Default to imbalanced
+    partition_default = "dir" # Default partition type
+    class_per_client_default = 20 # Default classes per client for non-clustered generation
+
+    # Parse command line arguments
+    # Expected order: [script_name] [niid_status (noniid/iid)] [balance_status (balanced/imbalanced)] 
+    # [partition_type (e.g., dir)] [num_clients] [class_per_client (for non-clustered)] [mode (standard/clustered)]
+    
+    is_niid = is_niid_default
     if len(sys.argv) > 1:
-        niid = True if sys.argv[1] == "noniid" else False
-        
-    else:
-        niid = False
+        arg1_lower = sys.argv[1].lower()
+        if arg1_lower == "noniid":
+            is_niid = True
+        elif arg1_lower == "iid":
+            is_niid = False
 
+    is_balanced = is_balanced_default
     if len(sys.argv) > 2:
-        balance = False if sys.argv[2] == "balance" else False
+        arg2_lower = sys.argv[2].lower()
+        if arg2_lower == "balanced":
+            is_balanced = True
+        elif arg2_lower == "imbalanced":
+            is_balanced = False
+            
+    partition_type = partition_default
+    if len(sys.argv) > 3 and sys.argv[3] != "-":
+        partition_type = sys.argv[3]
+
+    num_clients_to_generate = num_clients_default
+    if len(sys.argv) > 4 and sys.argv[4].isdigit():
+        num_clients_to_generate = int(sys.argv[4])
+
+    class_per_client_to_use = class_per_client_default
+    if len(sys.argv) > 5 and sys.argv[5].isdigit():
+        class_per_client_to_use = int(sys.argv[5])
+
+    generation_mode = "standard" # Default to standard generation
+    if len(sys.argv) > 6:
+        generation_mode = sys.argv[6].lower()
+
+    # Determine data_dir based on mode and client count
+    if generation_mode == "clustered":
+        dynamic_data_dir = f"Cifar100_clustered_{num_clients_to_generate}_clients/"
     else:
-        balance = False
+        dynamic_data_dir = f"Cifar100_{num_clients_to_generate}_clients/"
 
-    partition = "dir"
+    print(f"--- Generating CIFAR-100 dataset with settings ---")
+    print(f"Generation Mode: {generation_mode}")
+    print(f"Data directory: {dynamic_data_dir}")
+    print(f"Client count: {num_clients_to_generate}")
+    print(f"Class count: {class_count_default}")
+    print(f"NIID: {is_niid}")
+    print(f"Balanced: {is_balanced}")
+    print(f"Partition type: {partition_type}")
+    if generation_mode != "clustered":
+        print(f"Classes per client (for initial distribution): {class_per_client_to_use}")
+    print(f"-------------------------------------------------")
 
-
-    generate_cifar100(
-                data_dir="Cifar100_clustered_1",  # 数据存储路径
-                client_count=20,                 # 客户端数量
-                class_count=100,                 # 类别数量
-                is_niid=True,                    # 非独立同分布设置
-                is_balanced=False,               # 非平衡分配
-                partition_type="dir")          
-    #         )
-    #     else:
-    #         cluster_info = generate_cifar100_with_clusters(
-    #             data_dir="Cifar100_clustered/",  # 数据存储路径
-    #             client_count=20,                 # 客户端数量
-    #             class_count=100,                 # 类别数量
-    #             is_niid=True,                    # 非独立同分布设置
-    #             is_balanced=False,               # 非平衡分配
-    #             partition_type="dir",            # 分区方式
-    #             num_concepts=5,                  # 概念数量
-    #             iterations=200,                  # 时间迭代数量
-    #             num_drifts=5                     # 漂移次数
-    #         )
-    # else:
-    #     print("need dataset arg")
+    if generation_mode == "clustered":
+        # Parameters for clustered generation (can be made configurable via args too)
+        num_concepts_clustered = 5
+        iterations_clustered = 200 # Example value, adjust as needed
+        num_drifts_clustered = 5   # Example value, adjust as needed
+        print(f"Clustered generation params: {num_concepts_clustered} concepts, {iterations_clustered} iterations, {num_drifts_clustered} drifts")
+        
+        cluster_info = generate_cifar100_with_clusters(
+            data_dir=dynamic_data_dir,
+            client_count=num_clients_to_generate,
+            class_count=class_count_default,
+            is_niid=is_niid,
+            is_balanced=is_balanced,
+            partition_type=partition_type,
+            num_concepts=num_concepts_clustered,
+            iterations=iterations_clustered,
+            num_drifts=num_drifts_clustered
+        )
+        # print(f"Clustering info: {cluster_info}") # Optional: print returned info
+    else: # Standard generation
+        generate_cifar100(
+            data_dir=dynamic_data_dir,
+            client_count=num_clients_to_generate,
+            class_count=class_count_default,
+            is_niid=is_niid,
+            is_balanced=is_balanced,
+            partition_type=partition_type,
+            class_per_client=class_per_client_to_use
+        )

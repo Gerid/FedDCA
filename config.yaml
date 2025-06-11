@@ -46,7 +46,7 @@ fedccfa:
 
 feddrift:
   detection_threshold: 0.15
-  drift_data_dir: "dataset/Cifar100_clustered" # Example path, ensure it exists or is created
+  drift_data_dir: "dataset/Cifar100_clustered_100_clients/" # Updated path for 100 clients
   use_drift_dataset: True
   max_iterations: 200 
   simulate_drift: True

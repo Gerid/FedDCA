@@ -219,7 +219,10 @@ class Client(object):
         test_acc = 0
         test_num = 0
         y_prob = []
-        y_true = []
+        y_true_auc = [] # Renamed for clarity, this is for AUC
+        
+        y_true_raw = [] # For F1 and TPR
+        y_pred_raw = [] # For F1 and TPR
 
         with torch.no_grad():
             for x, y in testloaderfull:
@@ -233,24 +236,49 @@ class Client(object):
                 test_acc += (torch.sum(torch.argmax(output, dim=1) == y)).item()
                 test_num += y.shape[0]
 
+                # For AUC
                 y_prob.append(output.detach().cpu().numpy())
                 nc = self.num_classes
                 if self.num_classes == 2:
-                    nc += 1
+                    nc += 1 # Adjusted for binary case if necessary by original code
                 lb = label_binarize(y.detach().cpu().numpy(), classes=np.arange(nc))
-                if self.num_classes == 2:
-                    lb = lb[:, :2]
-                y_true.append(lb)
+                if self.num_classes == 2 and lb.shape[1] > 1: # Ensure correct shape for binary
+                    lb = lb[:, :self.num_classes-1] if self.num_classes > 1 else lb # Adapted from potential original logic
+                y_true_auc.append(lb)
+
+                # For F1 and TPR
+                y_true_raw.append(y.cpu().numpy())
+                predictions = torch.argmax(output, dim=1)
+                y_pred_raw.append(predictions.cpu().numpy())
 
         # self.model.cpu()
         # self.save_model(self.model, 'model')
 
-        y_prob = np.concatenate(y_prob, axis=0)
-        y_true = np.concatenate(y_true, axis=0)
+        y_prob_flat = np.concatenate(y_prob, axis=0)
+        y_true_auc_flat = np.concatenate(y_true_auc, axis=0)
+        
+        # Calculate AUC
+        # Handle potential ValueError if only one class present in y_true_auc_flat for a client
+        auc = 0.0
+        try:
+            if len(np.unique(y_true_auc_flat)) > 1 or (y_true_auc_flat.ndim > 1 and y_true_auc_flat.shape[1] > 1 and np.any(np.sum(y_true_auc_flat, axis=0) > 0)):
+                 auc = metrics.roc_auc_score(y_true_auc_flat, y_prob_flat, average="micro")
+            else:
+                # print(f"Client {self.id}: AUC not computed due to single class in y_true_auc_flat.")
+                pass # auc remains 0.0
+        except ValueError as e:
+            # print(f"Client {self.id}: Could not calculate AUC: {e}")
+            pass # auc remains 0.0
 
-        auc = metrics.roc_auc_score(y_true, y_prob, average="micro")
 
-        return test_acc, test_num, auc
+        # Calculate F1 and TPR (Weighted)
+        y_true_flat_raw = np.concatenate(y_true_raw)
+        y_pred_flat_raw = np.concatenate(y_pred_raw)
+
+        f1_weighted = metrics.f1_score(y_true_flat_raw, y_pred_flat_raw, average='weighted', zero_division=0)
+        tpr_weighted = metrics.recall_score(y_true_flat_raw, y_pred_flat_raw, average='weighted', zero_division=0) # recall_score is TPR
+
+        return test_acc, test_num, auc, f1_weighted, tpr_weighted
 
     def train_metrics(self):
         trainloader = self.load_train_data()

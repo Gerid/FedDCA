@@ -45,6 +45,10 @@ class clientDCA(Client):
         self.add_noise_to_profiles = getattr(args, 'add_noise_to_profiles', False)
         self.profile_noise_stddev = getattr(args, 'profile_noise_stddev', 0.01)
 
+        # Ablation study flags from args
+        self.ablation_no_lp = getattr(args, 'ablation_no_lp', False)
+        self.ablation_lp_type = getattr(args, 'ablation_lp_type', 'feature_based') # 'feature_based' or 'class_counts'
+
         # Loss function for collecting per-sample losses (typically CrossEntropy for classification)
         self.loss_fn_per_sample = nn.CrossEntropyLoss(reduction='none').to(self.device)
         
@@ -124,14 +128,52 @@ class clientDCA(Client):
 
     def get_label_profiles(self):
         """
-        Generates Label Profiles by selecting N lowest-loss samples per label from
-        the features and losses collected during the last training round.
-        Optionally adds Gaussian noise to the features.
+        Generates Label Profiles based on ablation settings.
+        - If ablation_no_lp is True, returns None.
+        - If ablation_lp_type is 'class_counts', returns class count based profiles.
+        - Otherwise, returns feature-based profiles (N lowest-loss samples per label).
         Returns:
-            label_profiles: Dict[label, Tuple[np.ndarray_samples, np.ndarray_losses]]
+            label_profiles: Dict[label, Tuple[np.ndarray_samples, np.ndarray_losses]] or Dict[label, float] or None
         """
+        if self.ablation_no_lp:
+            # print(f"Client {self.id}: Ablation: No LPs requested.")
+            return None # Return None if LPs are disabled
+
+        if self.ablation_lp_type == 'class_counts':
+            # print(f"Client {self.id}: Ablation: Generating class count-based LPs.")
+            trainloader = self.load_train_data() # Or use self.train_data if already loaded
+            class_counts = {}
+            total_samples = 0
+            for _, y_batch in trainloader:
+                for y_sample in y_batch:
+                    label = y_sample.item()
+                    class_counts[label] = class_counts.get(label, 0) + 1
+                    total_samples += 1
+            
+            if total_samples == 0:
+                return {} # Return empty dict if no samples
+            
+            # Normalize counts to get a distribution (profile)
+            # The server-side distance metric needs to be appropriate for this type of profile.
+            # For now, sending raw counts, normalization can be done server-side if needed or here.
+            # Or, send as a structure that mimics the feature-based one if server expects (samples, losses)
+            # For simplicity, let's send a dict of {label: normalized_count} or {label: count}
+            # The server's _estimate_profile_size and distance functions will need to handle this.
+            # Let's send normalized counts for now, as it represents a distribution.
+            normalized_class_counts = {label: count / total_samples for label, count in class_counts.items()}
+            # To fit the expected Tuple[np.ndarray_samples, np.ndarray_losses] structure somewhat,
+            # we can store the count as a single-element array in the 'samples' part and None for losses.
+            # This is a bit of a hack and might need refinement based on how server processes it.
+            class_count_profiles = {}
+            for label, norm_count in normalized_class_counts.items():
+                # Storing the normalized count as a 1x1 array in the first element of the tuple.
+                # The second element (losses) is None.
+                class_count_profiles[label] = (np.array([[norm_count]]), None) 
+            return class_count_profiles
+
+        # Original feature-based label profile generation
         if not hasattr(self, 'current_round_training_outputs') or not self.current_round_training_outputs:
-            # print(f"Client {self.id}: No training outputs collected for label profiles. Returning empty dict.")
+            # print(f"Client {self.id}: No training outputs collected for feature-based label profiles. Returning empty dict.")
             return {}
 
         # Group collected (features, loss) by label

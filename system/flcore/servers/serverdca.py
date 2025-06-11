@@ -1,44 +1,52 @@
-import time
 import os
 import numpy as np
 import torch
-import torch.nn as nn
+import copy
+import time
+import random
+import json
+from collections import Counter, OrderedDict
 from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
-import ot
-import copy # Added for deepcopying profiles if needed
-import random # Added to resolve NameError
-from sklearn.cluster import KMeans # Added for run_vwc_clustering fallback
-from sklearn.metrics import silhouette_score, silhouette_samples
+from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_score # silhouette_score added
 from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
+from scipy.spatial import Voronoi # voronoi_plot_2d removed as it's not directly used for filling regions
+import matplotlib.pyplot as plt
+# import matplotlib.colors as mcolors # Not strictly necessary for current cmap usage
+import ot # Python Optimal Transport
+
+# Assuming these are correctly placed for your project structure.
+# If these cause 'module not found', ensure PYTHONPATH or project structure is correct.
+from flcore.servers.serverbase import Server # Relative import for serverbase
+from flcore.clients.clientdca import clientDCA # Relative import for clientDCA
+
 from scipy.stats import wasserstein_distance
-import itertools # For combinations in splitting
+import itertools  # For combinations in splitting
 
 # Added imports for comprehensive evaluation
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
-from collections import Counter # For purity calculation
-import json # For saving evaluation report
+from collections import Counter  # For purity calculation
+import json  # For saving evaluation report
 
-import wandb # Added for global access, complemented by try-except in __init__
+import wandb  # Added for global access, complemented by try-except in __init__
 
-from flcore.servers.serverbase import Server
-from flcore.clients.clientdca import clientDCA # Ensure clientDCA is imported
 
-# Removed GMM-specific sampling. This function now directly computes Sinkhorn distance between two sets of samples.
 def compute_sinkhorn_distance_samples(samples1, samples2, reg=0.1):
     if samples1 is None or samples2 is None or samples1.size == 0 or samples2.size == 0 or samples1.shape[0] < 1 or samples2.shape[0] < 1:
         return float('inf')
-    
+
     s1 = samples1
     s2 = samples2
 
-    if s1.ndim == 1: s1 = s1.reshape(-1, 1)
-    if s2.ndim == 1: s2 = s2.reshape(-1, 1)
+    if s1.ndim == 1:
+        s1 = s1.reshape(-1, 1)
+    if s2.ndim == 1:
+        s2 = s2.reshape(-1, 1)
 
     if s1.shape[1] != s2.shape[1]:
         # print(f"Warning: Shape mismatch in compute_sinkhorn_distance_samples. s1: {s1.shape}, s2: {s2.shape}")
         return float('inf')
-    if s1.shape[1] == 0 : # No features
+    if s1.shape[1] == 0:  # No features
         return float('inf')
 
     try:
@@ -52,11 +60,11 @@ def compute_sinkhorn_distance_samples(samples1, samples2, reg=0.1):
         # Define uniform marginal distributions
         a = np.ones((s1.shape[0],), dtype=np.float64) / s1.shape[0]
         b = np.ones((s2.shape[0],), dtype=np.float64) / s2.shape[0]
-        
+
         # Use ot.sinkhorn to get the transport plan gamma
         # Then compute the squared Sinkhorn distance as sum(gamma * M)
         gamma = ot.sinkhorn(a, b, M, reg=reg, numItermax=200, stopThr=1e-7)
-        
+
         # The squared Sinkhorn distance (transport cost)
         dist_sq_val = np.sum(gamma * M)
 
@@ -64,7 +72,7 @@ def compute_sinkhorn_distance_samples(samples1, samples2, reg=0.1):
 
         if np.isnan(dist_sq_val) or np.isinf(dist_sq_val):
             return float('inf')
-        
+
         # dist_sq_val is now the squared Sinkhorn distance.
         # For comparison purposes, the squared distance is often sufficient and avoids sqrt.
         # If the actual distance is needed, uncomment the next lines:
@@ -72,8 +80,8 @@ def compute_sinkhorn_distance_samples(samples1, samples2, reg=0.1):
         #     print(f"Warning: Negative squared Sinkhorn distance ({dist_sq_val}) before sqrt. Returning inf.")
         #     return float('inf')
         # return np.sqrt(dist_sq_val)
-        
-        return dist_sq_val # Returning squared distance for now
+
+        return dist_sq_val  # Returning squared distance for now
     except Exception as e:
         print(f"Error in compute_sinkhorn_distance_samples: {e}")
         return float('inf')
@@ -81,6 +89,8 @@ def compute_sinkhorn_distance_samples(samples1, samples2, reg=0.1):
 # Removed GMM-specific sampling and final GMM fitting.
 # This function now computes Wasserstein barycenter from a list of sample sets.
 # It returns the barycentric samples directly as an np.ndarray.
+
+
 def compute_wasserstein_barycenter_samples(client_sample_sets_list, client_weights, reg=0.1):
     if not client_sample_sets_list or len(client_sample_sets_list) != len(client_weights):
         # print("Warning: Invalid input for compute_wasserstein_barycenter_samples.")
@@ -92,10 +102,12 @@ def compute_wasserstein_barycenter_samples(client_sample_sets_list, client_weigh
     for i, s_set in enumerate(client_sample_sets_list):
         if s_set is None or s_set.size == 0:
             continue
-        
+
         current_samples = s_set
-        if current_samples.ndim == 1: current_samples = current_samples.reshape(-1, 1) # Ensure 2D
-        if current_samples.ndim == 0: continue
+        if current_samples.ndim == 1:
+            current_samples = current_samples.reshape(-1, 1)  # Ensure 2D
+        if current_samples.ndim == 0:
+            continue
 
         active_samples_list.append(current_samples)
         active_weights.append(client_weights[i])
@@ -103,13 +115,13 @@ def compute_wasserstein_barycenter_samples(client_sample_sets_list, client_weigh
     if not active_samples_list or not active_weights:
         # print("Warning: No active samples or weights for barycenter computation.")
         return None
-        
+
     # Check dimensionality consistency
     dim = active_samples_list[0].shape[1]
     if not all(s.shape[1] == dim for s in active_samples_list):
         # print("Warning: Dimensionality mismatch in samples for barycenter.")
         return None
-    if dim == 0: 
+    if dim == 0:
         # print("Warning: Zero dimensionality samples for barycenter.")
         return None
 
@@ -117,153 +129,130 @@ def compute_wasserstein_barycenter_samples(client_sample_sets_list, client_weigh
     sum_weights = np.sum(normalized_weights)
     if sum_weights <= 0:
         # print("Warning: Sum of weights is not positive for barycenter.")
-        return None 
+        return None
     normalized_weights /= sum_weights
 
     try:
         # ot.bregman.barycenter expects a list of sample arrays
         barycentric_samples = ot.bregman.barycenter(
-            active_samples_list, 
-            reg=reg, 
+            active_samples_list,
+            reg=reg,
             weights=normalized_weights,
-            stopThr=1e-5, 
-            numItermax=150, # Consider making these configurable
-            verbose=False, 
+            stopThr=1e-5,
+            numItermax=150,  # Consider making these configurable
+            verbose=False,
             log=False
         )
 
         if barycentric_samples is None or barycentric_samples.size == 0:
             # print("Warning: Barycenter computation resulted in no samples.")
             return None
-        
-        return barycentric_samples # Return the raw barycentric samples
+
+        return barycentric_samples  # Return the raw barycentric samples
     except Exception as e:
         # print(f"Error in compute_wasserstein_barycenter_samples: {e}")
         # print(traceback.format_exc())
         return None
 
+
 def _get_feature_extractor_module_from_model(model_instance):
     if hasattr(model_instance, 'base') and model_instance.base is not None:
         return model_instance.base
-    elif hasattr(model_instance, 'body') and model_instance.body is not None: # For models like ResNet
+    elif hasattr(model_instance, 'body') and model_instance.body is not None:  # For models like ResNet
         return model_instance.body
-    elif hasattr(model_instance, 'features') and model_instance.features is not None: # For models like VGG
+    elif hasattr(model_instance, 'features') and model_instance.features is not None:  # For models like VGG
         return model_instance.features
-    elif hasattr(model_instance, 'encoder') and model_instance.encoder is not None: # For autoencoder-like models
+    # For autoencoder-like models
+    elif hasattr(model_instance, 'encoder') and model_instance.encoder is not None:
         return model_instance.encoder
     # print(f"Warning: Could not identify feature extractor module from model.")
     return None
-
 class FedDCA(Server):
     def __init__(self, args, times):
         super().__init__(args, times)
         self.set_slow_clients()
-        self.set_clients(clientDCA) 
-        
-        self.cluster_inited = False
-        self.args = args
-        self.args.load_pretrain = False 
+        self.set_clients(clientDCA)
+        self.num_classes = args.num_classes
+        self.feature_dim = getattr(args, 'feature_dim', None)
 
-        self.client_label_profiles = {} 
-        self.client_label_profiles_history = {} # User's existing attribute
-        self.drift_threshold_wasserstein = args.drift_threshold_wasserstein if hasattr(args, 'drift_threshold_wasserstein') else 0.5 
-        self.reduce_drifted_influence_factor = args.reduce_drifted_influence_factor if hasattr(args, 'reduce_drifted_influence_factor') else 1.0
+        self.client_label_profiles = {}
+        self.client_classifier_params = {}
+        self.client_drift_status = {}
+        self.client_cluster_assignments = {}
+        self.cluster_classifiers = {}
+        self.global_classifier_head = None
+        self.drift_detection_threshold = getattr(args, 'drift_detection_threshold', 0.5)
+        self.drift_threshold_wasserstein = getattr(args, 'drift_threshold_wasserstein', self.drift_detection_threshold) # Initialize here
+        self.cluster_update_freq = getattr(args, 'cluster_update_freq', 5)
+        self.max_clusters = getattr(args, 'max_clusters', 5)
+        self.min_clusters_auto = getattr(args, 'min_clusters_auto', 2)
+        self.auto_determine_k = getattr(args, 'auto_determine_k', False)
+        self.vwc_weighting_alpha = getattr(args, 'vwc_weighting_alpha', 0.5)
+        self.use_optimal_transport_for_lp_distance = getattr(args, 'use_optimal_transport_for_lp_distance', True)
+        self.lp_distance_metric = getattr(args, 'lp_distance_metric', 'wasserstein')
+        # self.reduce_drifted_influence_factor = args.reduce_drifted_influence_factor if hasattr(args, 'reduce_drifted_influence_factor') else 1.0
         
         # VWC specific attributes from user's code
         self.vwc_reg = args.vwc_reg if hasattr(args, 'vwc_reg') else 0.1
-        self.vwc_num_samples_dist = args.vwc_num_samples_dist if hasattr(args, 'vwc_num_samples_dist') else 500
-        self.vwc_num_samples_bary = args.vwc_num_samples_bary if hasattr(args, 'vwc_num_samples_bary') else 500
-        self.vwc_num_samples_concept = args.vwc_num_samples_concept if hasattr(args, 'vwc_num_samples_concept') else 30 
+        # self.vwc_num_samples_dist = args.vwc_num_samples_dist if hasattr(args, 'vwc_num_samples_dist') else 500
+        # self.vwc_num_samples_bary = args.vwc_num_samples_bary if hasattr(args, 'vwc_num_samples_bary') else 500
+        # self.vwc_num_samples_concept = args.vwc_num_samples_concept if hasattr(args, 'vwc_num_samples_concept') else 30 
         self.vwc_num_centroid_samples = args.vwc_num_centroid_samples if hasattr(args, 'vwc_num_centroid_samples') else 30 # User had this
         self.vwc_max_iter = args.vwc_max_iter if hasattr(args, 'vwc_max_iter') else 10
         self.vwc_K_t = args.vwc_K_t if hasattr(args, 'vwc_K_t') else 3 # User's default for K_t
         self.vwc_drift_penalty_factor = args.vwc_drift_penalty_factor if hasattr(args, 'vwc_drift_penalty_factor') else 0.5
-        self.vwc_potential_update_factor = args.vwc_potential_update_factor if hasattr(args, 'vwc_potential_update_factor') else self.vwc_reg 
+        # self.vwc_potential_update_factor = args.vwc_potential_update_factor if hasattr(args, 'vwc_potential_update_factor') else self.vwc_reg 
         
-        # Dynamic K configuration
-        self.dynamic_k_enabled = getattr(args, 'dynamic_k_enabled', False)
-        self.dynamic_k_min = getattr(args, 'dynamic_k_min', 2)
-        self.dynamic_k_max = getattr(args, 'dynamic_k_max', 10)
-        self.dynamic_k_start_round = getattr(args, 'dynamic_k_start_round', 0) # Round from which to start dynamic K adjustments
-        self.dynamic_k_silhouette_method = getattr(args, 'dynamic_k_silhouette_method', 'avg_client_silhouette') # e.g., 'avg_client_silhouette' or 'standard'
-        self.dynamic_k_silhouette_range_step = getattr(args, 'dynamic_k_silhouette_range_step', 1) # Step for K range in silhouette analysis
-        # self.dynamic_k_initial_estimation_iter = getattr(args, 'dynamic_k_initial_estimation_iter', 3) # Iterations for VWC during K estimation (if VWC itself is iterative) - currently GMM is direct
-        self.dynamic_k_refinement_iterations = getattr(args, 'dynamic_k_refinement_iterations', 5) # Max iterations for merge/split refinement
-        self.dynamic_k_merge_wasserstein_threshold = getattr(args, 'dynamic_k_merge_wasserstein_threshold', 0.2) # Threshold for merging clusters
-        self.dynamic_k_split_dispersion_threshold = getattr(args, 'dynamic_k_split_dispersion_threshold', 0.5) # Threshold for splitting clusters
-        self.dynamic_k_split_min_clients = getattr(args, 'dynamic_k_split_min_clients', 5) # Min clients in a cluster to consider splitting
-        self.dynamic_k_split_subcluster_k = getattr(args, 'dynamic_k_split_subcluster_k', 2) # Number of sub-clusters when splitting
-        self.dynamic_k_min_silhouette_improvement = getattr(args, 'dynamic_k_min_silhouette_improvement', 0.01) # Min improvement for merge/split (optional)
 
-        self.gmm_n_components_concept = args.gmm_n_components_concept if hasattr(args, 'gmm_n_components_concept') else 1
-        self.gmm_n_components_cluster = args.gmm_n_components_cluster if hasattr(args, 'gmm_n_components_cluster') else 1
-        self.gmm_cov_type_barycenter = args.gmm_cov_type_barycenter if hasattr(args, 'gmm_cov_type_barycenter') else 'full'
-        self.gmm_reg_covar_barycenter = args.gmm_reg_covar_barycenter if hasattr(args, 'gmm_reg_covar_barycenter') else 1e-6
+        self.ablation_no_lp = getattr(args, 'ablation_no_lp', False)
+        self.ablation_lp_type = getattr(args, 'ablation_lp_type', 'feature_based')
+        self.ablation_no_drift_detect = getattr(args, 'ablation_no_drift_detect', False)
+        self.ablation_no_clustering = getattr(args, 'ablation_no_clustering', False)
 
-        self.cluster_classifiers = {}  
-        self.client_cluster_assignments = {}  
-        self.client_drift_status = {} # From user's perform_drift_analysis_and_adaptation
-        self.client_classifier_params = {} # From user's receive_client_updates
+        self.cluster_visualization_type = getattr(
+            args, 'cluster_visualization_type', 'voronoi')  # voronoi
+        self.cluster_tsne_feature_source = getattr(args, 'cluster_tsne_feature_source', 'lp')
 
-        self.clf_keys = [] 
-        if hasattr(args.model, 'head') and args.model.head is not None:
-            self.clf_keys = list(args.model.head.state_dict().keys()) # Completed this line
-        
-        self.Budget = []
-        # self.current_round = 0 # Initialized in ServerBase
+        self.client_label_profiles_history = {client.id: {} for client in self.clients} # Changed [] to {}
+        self.true_client_concepts = {}
+        self._load_ground_truth_concepts() # Call with parentheses
 
-        # Comprehensive evaluation system initialization
         self.evaluation_metrics = {
-            'clustering_quality': {
-                'ari_history': [], 'nmi_history': [], 'purity_history': [],
-            },
-            'communication_efficiency': {
-                'upload_bytes_per_round': [], 'download_bytes_per_round': [],
-                'avg_client_compute_time_per_round': [], 'server_compute_time_per_round': []
-            },
-            'fairness_metrics': {
-                'accuracy_std_per_round': [], 'worst_client_accuracy_per_round': [],
-                'client_accuracies_history': {} # Dict[round, List[acc]]
-            },
-            'drift_adaptation_capability': {
-                'detected_drifts_per_round': [],             # Count of drifted clients each round
-                'accuracy_drifted_clients_post_adaptation': [], # Avg accuracy of clients flagged as drifted, after adaptation
-                'accuracy_non_drifted_clients': [],          # Avg accuracy of non-drifted clients for comparison
-            }
+            'clustering_quality': {'ari_history': [], 'nmi_history': [], 'purity_history': []},
+            'communication_efficiency': {'upload_bytes_per_round': [], 'download_bytes_per_round': [], 'avg_client_compute_time_per_round': [], 'server_compute_time_per_round': []},
+            'fairness_metrics': {'accuracy_std_per_round': [], 'worst_client_accuracy_per_round': [], 'client_accuracies_history': {}},
+            'drift_adaptation_capability': {'detected_drifts_per_round': [], 'accuracy_drifted_clients_post_adaptation': [], 'accuracy_non_drifted_clients': []}
         }
-        self.true_client_concepts = {}  # Dict[client_id, concept_id] for clustering eval
-        
-        # For current round's detailed communication tracking
-        self.bytes_tracker = { 
-            'upload_per_client': {}, 'download_per_client': {},
-            'total_upload_this_round': 0, 'total_download_this_round': 0
+        self.bytes_tracker = {
+            'upload_per_client': {client.id: 0 for client in self.clients},
+            'download_per_client': {client.id: 0 for client in self.clients},
+            'total_upload_this_round': 0,
+            'total_download_this_round': 0
         }
-        
-        # Wandb setup
-        if self.args.use_wandb:
-            try:
-                import wandb # Ensure wandb is imported here
-            except ImportError:
-                print("wandb not installed, proceeding without it.")
-                self.args.use_wandb = False
+        self.if_visualize_clustering_results = getattr(args, 'visualize_clusters', False)
+        # self.vwc_K_t = self.max_clusters # Initialize vwc_K_t, e.g., to max_clusters or a dynamic value
+        self.clf_keys = None # Initialize clf_keys
+
+        print(f"FedDCA Server initialized with ablations: no_lp={self.ablation_no_lp}, lp_type={self.ablation_lp_type}, no_drift={self.ablation_no_drift_detect}, no_clustering={self.ablation_no_clustering}")
+        print(f"Visualization options: type={self.cluster_visualization_type}, source={self.cluster_tsne_feature_source}")
 
     def train(self):
         for i in range(self.global_rounds + 1):
             self.current_round = i
-            self._init_round_tracking()  # Initialize round-specific trackers
-            self._load_ground_truth_concepts()  # Load true client concepts
+            self._init_round_tracking()  # Initialize round-specific trackers with parentheses
+            # self._load_ground_truth_concepts()  # Load true client concepts with parentheses - called in init already
 
             server_compute_time_this_round = 0
 
             self.selected_clients = self.select_clients()
-            
+            self.apply_drift_transformation()
             send_models_start_time = time.time()
             self.send_models()
             server_compute_time_this_round += (time.time() - send_models_start_time)
             if self.current_round % self.args.eval_gap == 0:
                 print(f"\n-------------Round number: {i}-------------")
                 print("\nEvaluate global models")
-                self.evaluate()  # ServerBase evaluate method
+                self.evaluate(is_global=True)  # ServerBase evaluate method
 
             client_compute_times_this_round = []
             for client in self.selected_clients:
@@ -306,7 +295,7 @@ class FedDCA(Server):
             if i % self.eval_gap == 0: # Avoid evaluation at round 0 if not meaningful
                 print("\nEvaluate personalized models")
                 self.evaluate(is_global=False)
-                self._comprehensive_evaluation()
+                self._comprehensive_evaluation(self.if_visualize_clustering_results)
 
             # Original evaluate call (can be removed if _comprehensive_evaluation covers it)
             # if i % self.eval_gap == 0:
@@ -346,7 +335,12 @@ class FedDCA(Server):
              feature_extractor_params = {k: v.cpu() for k, v in self.global_model.body.state_dict().items()}
         else: 
             print("Warning: Could not determine feature extractor from global_model for sending.")
-            feature_extractor_params = {k: v.cpu() for k, v in self.global_model.state_dict().items()}
+            # Fallback: try to send the whole model state dict if no specific FE part is found
+            # This might not be what clients expect if they are designed for separate FE/head parts.
+            feature_extractor_params = {k: v.cpu() for k, v in self.global_model.state_dict().items() if not (hasattr(self.global_model, 'head') and k.startswith('head.'))}
+            if not feature_extractor_params: # If head was the only part or filtering failed
+                 feature_extractor_params = {k: v.cpu() for k, v in self.global_model.state_dict().items()}
+
 
         fe_size_bytes = self._calculate_model_size_from_state_dict(feature_extractor_params)
 
@@ -354,12 +348,21 @@ class FedDCA(Server):
             client.set_parameters(feature_extractor_params, part='feature_extractor')
             self._track_communication_bytes(client.id, fe_size_bytes, 'download')
             
-            cluster_id = self.client_cluster_assignments.get(client.id)
             classifier_params_to_send = None
-            if cluster_id is not None and cluster_id in self.cluster_classifiers:
-                classifier_params_to_send = {k: v.cpu() for k, v in self.cluster_classifiers[cluster_id].state_dict().items()}
-            elif hasattr(self.global_model, 'head') and self.global_model.head is not None:
-                classifier_params_to_send = {k: v.cpu() for k, v in self.global_model.head.state_dict().items()}
+            if self.ablation_no_clustering:
+                # If no clustering, all clients get the single aggregated classifier (expected to be in cluster_classifiers[0])
+                if 0 in self.cluster_classifiers:
+                    classifier_params_to_send = {k: v.cpu() for k, v in self.cluster_classifiers[0].state_dict().items()}
+                elif hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                    # Fallback to global_model.head if cluster_classifiers[0] isn't populated for some reason
+                    classifier_params_to_send = {k: v.cpu() for k, v in self.global_model.head.state_dict().items()}
+            else:
+                cluster_id = self.client_cluster_assignments.get(client.id)
+                if cluster_id is not None and cluster_id in self.cluster_classifiers:
+                    classifier_params_to_send = {k: v.cpu() for k, v in self.cluster_classifiers[cluster_id].state_dict().items()}
+                elif hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                    # Fallback if client not in a cluster or cluster has no classifier
+                    classifier_params_to_send = {k: v.cpu() for k, v in self.global_model.head.state_dict().items()}
             
             if classifier_params_to_send:
                 client.set_parameters(classifier_params_to_send, part='classifier')
@@ -378,16 +381,22 @@ class FedDCA(Server):
         self.bytes_tracker['total_upload_this_round'] = 0
 
         for client in self.selected_clients:
-            lp_c_t = client.get_label_profiles()
-            self.client_label_profiles[client.id] = lp_c_t
-            
-            # Estimate and track upload size for label profiles
-            profile_size_bytes = self._estimate_profile_size(lp_c_t)
-            self._track_communication_bytes(client.id, profile_size_bytes, 'upload')
+            if self.ablation_no_lp:
+                # If LPs are disabled, don't request or store them
+                self.client_label_profiles[client.id] = None # Or an empty dict, depending on downstream handling
+            else:
+                lp_c_t = client.get_label_profiles() # This will depend on client's ablation_lp_type
+                self.client_label_profiles[client.id] = lp_c_t
+                
+                # Estimate and track upload size for label profiles
+                profile_size_bytes = self._estimate_profile_size(lp_c_t)
+                self._track_communication_bytes(client.id, profile_size_bytes, 'upload')
 
-            if client.id not in self.client_label_profiles_history:
-                self.client_label_profiles_history[client.id] = {}
-            self.client_label_profiles_history[client.id][self.current_round] = copy.deepcopy(lp_c_t)
+                if client.id not in self.client_label_profiles_history:
+                    self.client_label_profiles_history[client.id] = {}
+                # Only store history if LPs are actually generated and used
+                if lp_c_t: # Ensure lp_c_t is not None or empty before deepcopying
+                    self.client_label_profiles_history[client.id][self.current_round] = copy.deepcopy(lp_c_t)
 
             if hasattr(client, 'get_clf_parameters'):
                 clf_params = client.get_clf_parameters()
@@ -449,14 +458,14 @@ class FedDCA(Server):
     def aggregate_parameters(self):
         """
         Aggregates feature extractors from selected clients to update the global model's feature extractor.
-        Also aggregates a global classifier head from received client classifier parameters.
-        Cluster-specific classifiers are handled in run_vwc_clustering.
+        Also aggregates a global classifier head from received client classifier parameters IF NOT using clustering or if specified.
+        If clustering is active (and not ablation_no_clustering), cluster-specific classifiers are handled in run_vwc_clustering.
         """
         if not self.selected_clients:
             # print("FedDCA: No selected clients for parameter aggregation.")
             return
 
-        # 1. Aggregate Feature Extractors
+        # 1. Aggregate Feature Extractors (always done)
         uploaded_feature_extractor_state_dicts = []
         feature_extractor_weights = []
 
@@ -502,6 +511,12 @@ class FedDCA(Server):
             # print("FedDCA: No feature extractors collected for aggregation. Global feature extractor not updated.")
 
         # 2. Aggregate a Global Classifier Head for self.global_model.head
+        # This global head is used as a fallback or if no_clustering is True.
+        # If ablation_no_clustering is True, run_vwc_clustering already handles creating a single aggregated classifier in self.cluster_classifiers[0].
+        # So, we only need to update self.global_model.head if clustering is OFF, or as a general global model.
+        # The logic in run_vwc_clustering for ablation_no_clustering already populates self.cluster_classifiers[0]
+        # which will be used by send_models. Here, we ensure self.global_model.head is also up-to-date.
+
         if not self.client_classifier_params:
             # print("FedDCA: No client classifier parameters received for global head aggregation.")
             return # Return if no classifier params, FE might have been updated.
@@ -512,49 +527,37 @@ class FedDCA(Server):
             
             # Find the first valid head to determine keys and initialize structure
             for cid_temp in self.client_classifier_params:
-                if self.client_classifier_params[cid_temp]: # Check if state_dict is not empty
-                    first_valid_head_state_dict = self.client_classifier_params[cid_temp]
+                if self.client_classifier_params[cid_temp]: # Check if not None or empty
+                    first_valid_head_state_dict = copy.deepcopy(self.client_classifier_params[cid_temp])
+                    aggregated_clf_params_state_dict = {k: torch.zeros_like(v) for k, v in first_valid_head_state_dict.items()}
                     break
             
-            if first_valid_head_state_dict:
-                # Initialize with zeros, same keys and device as the first valid head
-                aggregated_clf_params_state_dict = {
-                    k: torch.zeros_like(v, device=v.device) 
-                    for k, v in first_valid_head_state_dict.items()
-                }
-                total_clf_weight = 0.0
-                
-                # Build a map for client_train_samples lookup
-                client_train_samples_map = {c.id: c.train_samples for c in self.clients}
+            if aggregated_clf_params_state_dict is None:
+                # print("FedDCA: No valid client classifier state_dicts found to initialize aggregation.")
+                return
 
-                for client_id, clf_state_dict in self.client_classifier_params.items():
-                    if clf_state_dict: # if state_dict is not empty
-                        weight = client_train_samples_map.get(client_id, 1.0) # Default weight 1.0
-                        
-                        for key in aggregated_clf_params_state_dict:
-                            if key in clf_state_dict: # Ensure key exists in current client's head
-                                # Ensure tensors are on the same device before aggregation
-                                # self.client_classifier_params should store CPU tensors as per clientDCA
-                                aggregated_clf_params_state_dict[key] += clf_state_dict[key].to(aggregated_clf_params_state_dict[key].device) * weight
-                        total_clf_weight += weight
-                
-                if total_clf_weight > 0:
+            total_clf_weight = 0
+            # Aggregate classifier parameters
+            for client in self.selected_clients:
+                if client.id in self.client_classifier_params and self.client_classifier_params[client.id]:
+                    client_clf_state_dict = self.client_classifier_params[client.id]
+                    weight = client.train_samples # Or other weighting scheme
+
                     for key in aggregated_clf_params_state_dict:
-                        aggregated_clf_params_state_dict[key] /= total_clf_weight
-                    
-                    try:
-                        self.global_model.head.load_state_dict(aggregated_clf_params_state_dict)
-                    except RuntimeError as e:
-                        # print(f"FedDCA: Error loading aggregated global classifier head params (strict=True): {e}. Trying strict=False.")
-                        try:
-                            self.global_model.head.load_state_dict(aggregated_clf_params_state_dict, strict=False)
-                        except Exception as e_false:
-                            # print(f"FedDCA: Error loading aggregated global classifier head params (strict=False): {e_false}")
-                            pass
-                # else:
-                    # print("FedDCA: Total weight for global classifier head aggregation is zero. Global head not updated.")
+                        if key in client_clf_state_dict:
+                            aggregated_clf_params_state_dict[key] += client_clf_state_dict[key].cpu() * weight
+                    total_clf_weight += weight
+            
+            if total_clf_weight > 0:
+                for key in aggregated_clf_params_state_dict:
+                    aggregated_clf_params_state_dict[key] /= total_clf_weight
+                
+                self.global_model.head.load_state_dict(aggregated_clf_params_state_dict)
+                # print("FedDCA: Global model head updated.")
             # else:
-                # print("FedDCA: No valid client classifier params found to initialize global head aggregation. Global head not updated.")
+                # print("FedDCA: Total weight for classifier aggregation is zero. Global head not updated.")
+
+
         # else:
             # print("FedDCA: Global model has no 'head' attribute, or it's None. Global head not updated.")
 
@@ -566,34 +569,37 @@ class FedDCA(Server):
     # Helper and Evaluation methods for FedDCA
     def _init_round_tracking(self):
         """Initializes/resets trackers for the current round (e.g., communication bytes)."""
-        self.bytes_tracker = { 
-            'upload_per_client': {client.id: 0 for client in self.selected_clients},
-            'download_per_client': {client.id: 0 for client in self.selected_clients},
-            'total_upload_this_round': 0,
-            'total_download_this_round': 0
-        }
+        self.bytes_tracker['total_upload_this_round'] = 0
+        self.bytes_tracker['total_download_this_round'] = 0
+        for client_id in self.bytes_tracker['upload_per_client']:
+            self.bytes_tracker['upload_per_client'][client_id] = 0
+        for client_id in self.bytes_tracker['download_per_client']:
+            self.bytes_tracker['download_per_client'][client_id] = 0
+
 
     def _load_ground_truth_concepts(self):
-        """Loads or updates the true concept IDs for each client.
-        This is a placeholder. In a real scenario, this might involve reading from a file 
-        or using information from a drift simulation environment.
-        For now, it assumes clients have a 'current_concept_id' attribute.
-        """
-        self.true_client_concepts.clear()
-        for client in self.clients: # Iterate over all clients, not just selected ones for this round,
-            if hasattr(client, 'current_concept_id'):
-                self.true_client_concepts[client.id] = client.current_concept_id
-            # else:
-            #     print(f"Warning: Client {client.id} does not have current_concept_id for ground truth.")
+        """Loads ground truth concepts for clients, e.g., from a file."""
+        # This is a placeholder. Implement according to how ground truth is stored.
+        # Example:
+        # try:
+        #     with open(os.path.join(self.args.data_dir, self.args.dataset, 'ground_truth_concepts.json'), 'r') as f:
+        #         self.true_client_concepts = json.load(f)
+        # except FileNotFoundError:
+        #     print("Warning: Ground truth concepts file not found.")
+        #     self.true_client_concepts = {} # Default to empty if not found
+        # except Exception as e:
+        #     print(f"Error loading ground truth concepts: {e}")
+        #     self.true_client_concepts = {}
+        pass # Placeholder implementation
 
     def _calculate_model_size_from_state_dict(self, state_dict):
-        """Calculates the size of a model's state_dict in bytes."""
-        if not state_dict: return 0
-        size_bytes = 0
+        """Calculates the size of a model's state dictionary in bytes."""
+        if state_dict is None:
+            return 0
+        total_bytes = 0
         for param_tensor in state_dict.values():
-            if isinstance(param_tensor, torch.Tensor):
-                size_bytes += param_tensor.element_size() * param_tensor.nelement()
-        return size_bytes
+            total_bytes += param_tensor.nelement() * param_tensor.element_size()
+        return total_bytes
 
     def _estimate_profile_size(self, label_profile):
         """Estimates the size of a client's label profile in bytes.
@@ -610,10 +616,9 @@ class FedDCA(Server):
         size_bytes += len(label_profile) * (np.dtype(int).itemsize + 2 * np.dtype(np.intp).itemsize) # For keys and tuple pointers
         return size_bytes
 
+
     def _track_communication_bytes(self, client_id, num_bytes, direction):
-        """Tracks communication bytes for a client and the round total.
-        direction: 'upload' or 'download'
-        """
+        """Tracks communication bytes for a client and the round total."""
         if direction == 'upload':
             self.bytes_tracker['upload_per_client'][client_id] = self.bytes_tracker['upload_per_client'].get(client_id, 0) + num_bytes
             self.bytes_tracker['total_upload_this_round'] += num_bytes
@@ -695,21 +700,17 @@ class FedDCA(Server):
     def _get_current_client_accuracies(self):
         """Collects test accuracies from evaluated clients and returns them as a dictionary."""
         client_accuracies_map = {}
-        # self.eval_clients contains the client objects that were evaluated in the last call to self.evaluate()
-        # self.rs_per_acc contains the corresponding accuracies in the same order.
         if hasattr(self, 'eval_clients') and hasattr(self, 'rs_per_acc') and self.eval_clients and self.rs_per_acc:
+            # Both self.eval_clients and self.rs_per_acc exist and are non-empty
             if len(self.eval_clients) == len(self.rs_per_acc):
                 for client_obj, acc in zip(self.eval_clients, self.rs_per_acc):
                     client_accuracies_map[client_obj.id] = acc
             else:
+                # This warning is kept as it indicates a specific inconsistency
                 print(f"Warning: Mismatch in lengths of eval_clients ({len(self.eval_clients)}) and rs_per_acc ({len(self.rs_per_acc)}).")
-        else:
-            print("Warning: eval_clients or rs_per_acc not populated. Ensure self.evaluate() was called.")
-            # Fallback or default behavior if data is missing
-            # For example, return empty or query all clients if necessary, though this might be slow.
-            # For now, returning empty if not populated by self.evaluate().
-            pass
-        
+        # else: If eval_clients or rs_per_acc are empty, or don't exist, 
+        # client_accuracies_map remains empty. No general warning is printed here.
+        # Downstream functions are expected to handle an empty client_accuracies_map gracefully.
         return client_accuracies_map
 
     def _evaluate_fairness_metrics(self):
@@ -737,7 +738,6 @@ class FedDCA(Server):
         """Evaluates the system's capability to adapt to concept drift."""
         if not hasattr(self, 'client_drift_status') or not self.client_drift_status:
             self.evaluation_metrics['drift_adaptation_capability']['detected_drifts_per_round'].append(0)
-            # Append NaN or a placeholder if accuracies cannot be calculated due to no drift / no clients
             self.evaluation_metrics['drift_adaptation_capability']['accuracy_drifted_clients_post_adaptation'].append(float('nan'))
             self.evaluation_metrics['drift_adaptation_capability']['accuracy_non_drifted_clients'].append(float('nan'))
             return
@@ -745,7 +745,7 @@ class FedDCA(Server):
         num_drifted_clients = sum(self.client_drift_status.values())
         self.evaluation_metrics['drift_adaptation_capability']['detected_drifts_per_round'].append(num_drifted_clients)
 
-        current_client_accuracies = self._get_current_client_accuracies() # Assumes this returns a dict {client_id: accuracy}
+        current_client_accuracies = self._get_current_client_accuracies()
 
         drifted_client_accuracies = []
         non_drifted_client_accuracies = []
@@ -764,7 +764,7 @@ class FedDCA(Server):
         self.evaluation_metrics['drift_adaptation_capability']['accuracy_drifted_clients_post_adaptation'].append(avg_acc_drifted)
         self.evaluation_metrics['drift_adaptation_capability']['accuracy_non_drifted_clients'].append(avg_acc_non_drifted)
 
-        if self.args.use_wandb:
+        if wandb and self.args.use_wandb: # Check if wandb is available and enabled
             wandb.log({
                 f"drift_adaptation/detected_drifts_round_{self.current_round}": num_drifted_clients,
                 f"drift_adaptation/avg_acc_drifted_clients_round_{self.current_round}": avg_acc_drifted,
@@ -772,15 +772,243 @@ class FedDCA(Server):
                 "round": self.current_round
             })
 
-    def _comprehensive_evaluation(self):
+    def _visualize_clustering_results(self):
+        if not self.client_cluster_assignments:
+            print("Visualization: No client cluster assignments available. Skipping.")
+            return
+
+        client_ids_for_tsne = []
+        feature_vectors = []
+        cluster_labels_for_tsne = []
+        
+        plot_title_suffix = ""
+        plot_filename_suffix_part = ""
+
+        if self.cluster_tsne_feature_source == 'lp':
+            plot_title_suffix = "LP"
+            plot_filename_suffix_part = "lp_tsne"
+            if self.ablation_no_lp or not any(self.client_label_profiles.values()):
+                print("Visualization: Label profiles are disabled or no profiles available for t-SNE (source: LP). Skipping.")
+                return
+
+            for client_id, cluster_id in self.client_cluster_assignments.items():
+                profile = self.client_label_profiles.get(client_id)
+                if profile:
+                    all_samples_for_client = []
+                    for label, data_for_label in profile.items():
+                        samples = None
+                        if isinstance(data_for_label, tuple) and len(data_for_label) > 0:
+                            samples = data_for_label[0]
+                        elif isinstance(data_for_label, np.ndarray):
+                            samples = data_for_label
+
+                        if samples is not None and samples.size > 0:
+                            if samples.ndim == 2 and samples.shape[1] > 0:
+                                all_samples_for_client.append(samples)
+                            elif samples.ndim == 1:
+                                all_samples_for_client.append(samples.reshape(1, -1))
+                    
+                    if all_samples_for_client:
+                        try:
+                            if len(all_samples_for_client) > 1 and any(s.shape[1] != all_samples_for_client[0].shape[1] for s in all_samples_for_client if s.ndim == 2 and all_samples_for_client[0].ndim == 2 and all_samples_for_client[0].size > 0 and s.size > 0):
+                                if all_samples_for_client[0].shape[0] > 0 :
+                                     client_feature_vector = np.mean(all_samples_for_client[0], axis=0)
+                                else:
+                                    continue
+                            else:
+                                concatenated_samples = np.vstack(all_samples_for_client)
+                                if concatenated_samples.shape[0] > 0:
+                                    client_feature_vector = np.mean(concatenated_samples, axis=0)
+                                else:
+                                    continue
+                            
+                            feature_vectors.append(client_feature_vector)
+                            client_ids_for_tsne.append(client_id)
+                            cluster_labels_for_tsne.append(cluster_id)
+                        except (ValueError, IndexError) as e:
+                            # print(f"Visualization (LP): Error processing samples for client {client_id}: {e}. Skipping.")
+                            continue
+            if not feature_vectors:
+                print("Visualization (LP): No LP feature vectors extracted. Skipping.")
+                return
+
+        elif self.cluster_tsne_feature_source == 'model_params':
+            plot_title_suffix = "Model Params"
+            plot_filename_suffix_part = "params_tsne"
+            relevant_client_params = {cid: params for cid, params in self.client_classifier_params.items() if cid in self.client_cluster_assignments}
+
+            if not relevant_client_params:
+                print("Visualization: No relevant client classifier parameters available for assigned clusters. Skipping.")
+                return
+
+            for client_id, cluster_id in self.client_cluster_assignments.items():
+                params_dict = relevant_client_params.get(client_id)
+                if params_dict:
+                    all_param_tensors_flat = []
+                    for param_name in sorted(params_dict.keys()):
+                        param_tensor = params_dict[param_name]
+                        if isinstance(param_tensor, torch.Tensor):
+                            all_param_tensors_flat.append(param_tensor.detach().cpu().numpy().flatten())
+                    
+                    if all_param_tensors_flat:
+                        client_feature_vector = np.concatenate(all_param_tensors_flat)
+                        if client_feature_vector.size > 0:
+                            feature_vectors.append(client_feature_vector)
+                            client_ids_for_tsne.append(client_id)
+                            cluster_labels_for_tsne.append(cluster_id)
+            
+            if not feature_vectors:
+                 print("Visualization (Model Params): No model parameter feature vectors extracted. Skipping.")
+                 return
+        else:
+            print(f"Visualization: Unknown tsne_feature_source: {self.cluster_tsne_feature_source}. Skipping.")
+            return
+
+        if not feature_vectors:
+            print("Visualization: No feature vectors extracted for t-SNE. Skipping.")
+            return
+
+        feature_vectors_np = np.array(feature_vectors)
+        
+        if feature_vectors_np.ndim == 1:
+            if len(feature_vectors) == 1:
+                 feature_vectors_np = feature_vectors_np.reshape(1, -1)
+            else: 
+                print("Visualization: Feature vectors array is 1D unexpectedly for multiple clients. Skipping.")
+                return
+        
+        if feature_vectors_np.shape[0] <= 1 or feature_vectors_np.shape[1] == 0:
+            return
+            
+        n_samples_for_tsne = feature_vectors_np.shape[0]
+        perplexity_value = min(30.0, float(n_samples_for_tsne - 1))
+        
+        if perplexity_value < 1.0: 
+            return
+
+        try:
+            if self.cluster_tsne_feature_source == 'model_params':
+                scaler = StandardScaler()
+                feature_vectors_np = scaler.fit_transform(feature_vectors_np)
+
+            tsne = TSNE(n_components=2, 
+                        random_state=getattr(self.args, 'seed', 0), 
+                        perplexity=perplexity_value, 
+                        n_iter=1000, 
+                        init='pca', 
+                        learning_rate='auto')
+            tsne_results = tsne.fit_transform(feature_vectors_np)
+        except Exception as e: 
+            try:
+                tsne = TSNE(n_components=2, random_state=getattr(self.args, 'seed', 0), perplexity=perplexity_value, n_iter=1000, init='pca', learning_rate=200.0) 
+                tsne_results = tsne.fit_transform(feature_vectors_np)
+            except Exception as e_retry:
+                print(f"Visualization: Error during t-SNE: {e_retry}. Skipping.")
+                return
+
+        fig, ax = plt.subplots(figsize=(13, 11))
+        unique_clusters = sorted(list(set(cluster_labels_for_tsne)))
+        
+        if not unique_clusters:
+            plt.close(fig)
+            return
+
+        if len(unique_clusters) <= 10 and len(unique_clusters) > 0:
+            colors = plt.cm.get_cmap('tab10', len(unique_clusters)).colors
+        elif len(unique_clusters) > 0:
+            colors = plt.cm.get_cmap('viridis', len(unique_clusters)).colors
+        else:
+            colors = ['grey']
+        cluster_to_color = {cluster_id: colors[i % len(colors)] for i, cluster_id in enumerate(unique_clusters)}
+
+        current_visualization_type = self.cluster_visualization_type
+        if current_visualization_type == 'voronoi' and n_samples_for_tsne < 4:
+            print(f"Visualization: Not enough points ({n_samples_for_tsne}) for Voronoi plot. Falling back to scatter plot.")
+            current_visualization_type = 'scatter'
+
+        if current_visualization_type == 'scatter':
+            cluster_points_indices = {uid: [] for uid in unique_clusters}
+            for idx, cl_id in enumerate(cluster_labels_for_tsne):
+                cluster_points_indices[cl_id].append(idx)
+
+            for i, client_id_val in enumerate(client_ids_for_tsne): 
+                cluster_id = cluster_labels_for_tsne[i]
+                label = f'Cluster {cluster_id}' if i == cluster_points_indices[cluster_id][0] else None
+                ax.scatter(tsne_results[i, 0], tsne_results[i, 1], 
+                           color=cluster_to_color.get(cluster_id, 'grey'), 
+                           label=label,
+                           s=60, alpha=0.85, edgecolors='w')
+        
+        elif current_visualization_type == 'voronoi':
+            vor = Voronoi(tsne_results)
+            for r_idx, region_idx in enumerate(vor.point_region):
+                region = vor.regions[region_idx]
+                if not -1 in region:
+                    polygon = [vor.vertices[i] for i in region]
+                    cluster_id = cluster_labels_for_tsne[r_idx] 
+                    ax.fill(*zip(*polygon), alpha=0.4, color=cluster_to_color.get(cluster_id, 'lightgrey'))
+            
+            for i, client_id_val in enumerate(client_ids_for_tsne):
+                cluster_id = cluster_labels_for_tsne[i]
+                ax.scatter(tsne_results[i, 0], tsne_results[i, 1], 
+                           color=cluster_to_color.get(cluster_id, 'black'), 
+                           edgecolor='white', s=35, zorder=3)
+            ax.set_xlim(vor.min_bound[0] - 0.1, vor.max_bound[0] + 0.1)
+            ax.set_ylim(vor.min_bound[1] - 0.1, vor.max_bound[1] + 0.1)
+
+        if current_visualization_type == 'scatter':
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                try:
+                    sorted_handles_labels = sorted(zip(handles, labels), key=lambda x: int(x[1].split(' ')[-1]))
+                    ax.legend([h for h,l in sorted_handles_labels], [l for h,l in sorted_handles_labels], title="Client Clusters", bbox_to_anchor=(1.05, 1), loc='upper left')
+                except:
+                     ax.legend(handles=handles, labels=labels, title="Client Clusters", bbox_to_anchor=(1.05, 1), loc='upper left')
+        elif current_visualization_type == 'voronoi':
+            handles = [plt.Line2D([0], [0], marker='o', color='w', label=f'Cluster {uid}', 
+                                  markerfacecolor=cluster_to_color.get(uid, 'grey'), markersize=10) for uid in unique_clusters]
+            if handles:
+                ax.legend(handles=handles, title="Client Clusters", bbox_to_anchor=(1.05, 1), loc='upper left')
+
+        title = f'Client Clustering (t-SNE Source: {plot_title_suffix}, Viz: {current_visualization_type.capitalize()}) - Round {self.current_round}'
+        ax.set_title(title, fontsize=14)
+        ax.set_xlabel('t-SNE Component 1', fontsize=12)
+        ax.set_ylabel('t-SNE Component 2', fontsize=12)
+        ax.grid(True, linestyle='--', alpha=0.7)
+        fig.tight_layout(rect=[0, 0, 0.85, 1])
+
+        plot_filename_base = f"{self.dataset}_{self.algorithm}_round_{self.current_round}"
+        plot_filename = f"{plot_filename_base}_{plot_filename_suffix_part}_viz_{current_visualization_type}.png"
+        
+        results_subdir = os.path.join(self.save_folder_name, "results_extra_visualizations")
+        if not os.path.exists(results_subdir):
+            try:
+                os.makedirs(results_subdir)
+            except OSError as e:
+                print(f"Error creating directory {results_subdir}: {e}")
+                plt.close(fig)
+                return
+        plot_path = os.path.join(results_subdir, plot_filename)
+
+        try:
+            fig.savefig(plot_path, bbox_inches='tight')
+        except Exception as e:
+            print(f"Visualization: Error saving plot to {plot_path}: {e}")
+        plt.close(fig)
+
+    def _comprehensive_evaluation(self, if_visualize_clusters=False):
         """Performs a comprehensive evaluation of the system."""
         print(f"--- Comprehensive Evaluation for Round {self.current_round} ---")
         self._evaluate_clustering_quality()
         self._evaluate_communication_efficiency() # This is mostly data collection, reporting happens in final
         self._evaluate_fairness_metrics()
-        self._evaluate_drift_adaptation() # New call
+        self._evaluate_drift_adaptation() 
+        if if_visualize_clusters:
+            print("--- Visualizing Clustering Results ---")
+            self._visualize_clustering_results() # ADDED CALL
+            print("--- End of Visualization ---")
         print("--- End of Comprehensive Evaluation ---")
-    
+
     def _generate_final_evaluation_report(self):
         """Generates and prints/saves a final summary of all evaluations."""
         print("\n=============== Final Evaluation Report ===============")
@@ -938,61 +1166,6 @@ class FedDCA(Server):
             
         return score, client_concepts, centroids
 
-    def _initial_k_estimation(self, client_embeddings, client_label_profiles_np, client_weights_np):
-        """Phase 1: Estimate initial K_t using silhouette analysis."""
-        best_k = self.vwc_K_t # Fallback to user-defined K_t
-        best_silhouette_score = -1
-        best_concepts = None
-        best_centroids = None
-
-        print(f"Dynamic K: Initial K estimation phase. Range: [{self.dynamic_k_min}, {self.dynamic_k_max}]")
-
-        for k_candidate in range(self.dynamic_k_min, min(self.dynamic_k_max + 1, len(client_embeddings) +1), self.dynamic_k_silhouette_range_step):
-            if k_candidate <= 1: continue # Silhouette needs at least 2 clusters
-            
-            # Run VWC clustering for k_candidate (simplified or full)
-            # For this, we need a version of run_vwc_clustering that can be called with a specific K
-            # and returns client_concepts and centroids.
-            # The following is a simplified GMM approach for demonstration.
-            # In a real scenario, you'd call a modified run_vwc_clustering or its core logic.
-            
-            current_silhouette_score, concepts, centroids = self._calculate_avg_silhouette_for_k(
-                client_embeddings, k_candidate, client_label_profiles_np, client_weights_np
-            )
-            
-            print(f"  K={k_candidate}, Silhouette Score: {current_silhouette_score:.4f}")
-
-            if current_silhouette_score > best_silhouette_score:
-                best_silhouette_score = current_silhouette_score
-                best_k = k_candidate
-                best_concepts = concepts
-                best_centroids = centroids
-        
-        if best_concepts is None or best_centroids is None:
-            # Fallback if no valid K was found (e.g., all silhouette scores were -1)
-            print(f"Dynamic K: Initial estimation failed to find a suitable K. Falling back to K={self.vwc_K_t}.")
-            # Perform a default clustering with self.vwc_K_t to get initial concepts/centroids
-            _, best_concepts, best_centroids = self._calculate_avg_silhouette_for_k(
-                client_embeddings, self.vwc_K_t, client_label_profiles_np, client_weights_np
-            )
-            if best_concepts is None:
-                 print("CRITICAL: Fallback K also failed in initial_k_estimation. Using K=2 as emergency.")
-                 best_k = 2
-                 _, best_concepts, best_centroids = self._calculate_avg_silhouette_for_k(
-                    client_embeddings, best_k, client_label_profiles_np, client_weights_np
-                 )
-                 if best_concepts is None:
-                    # Ultimate fallback: assign all to one cluster if everything else fails
-                    print("CRITICAL: Emergency K=2 also failed. Assigning all clients to cluster 0.")
-                    best_k = 1
-                    best_concepts = np.zeros(len(client_embeddings), dtype=int)
-                    best_centroids = np.mean(client_embeddings, axis=0, keepdims=True)
-            else:
-                best_k = self.vwc_K_t # Ensure best_k reflects the fallback K used
-
-        print(f"Dynamic K: Initial K estimated to {best_k} with silhouette score: {best_silhouette_score:.4f}")
-        return best_k, best_concepts, best_centroids
-
     def _calculate_inter_centroid_wasserstein_distance(self, centroid1_profile, centroid2_profile):
         """Calculates Wasserstein distance between the label profiles of two centroids."""
         return wasserstein_distance(centroid1_profile, centroid2_profile)
@@ -1003,156 +1176,6 @@ class FedDCA(Server):
             return 0
         distances = np.linalg.norm(client_embeddings_in_cluster - cluster_centroid_embedding, axis=1)
         return np.mean(distances)
-
-    def _attempt_cluster_merge(self, current_k, client_embeddings, client_concepts, centroids, client_label_profiles_np):
-        """Phase 2: Attempt to merge clusters."""
-        if current_k <= self.dynamic_k_min:
-            return current_k, client_concepts, centroids, False 
-
-        effective_centroid_profiles = []
-        for i in range(current_k):
-            cluster_client_indices = np.where(client_concepts == i)[0]
-            if len(cluster_client_indices) > 0:
-                avg_profile = np.mean(client_label_profiles_np[cluster_client_indices], axis=0)
-                effective_centroid_profiles.append(avg_profile)
-            else:
-                effective_centroid_profiles.append(np.full(client_label_profiles_np.shape[1], np.inf))
-
-        if len(effective_centroid_profiles) < 2: 
-            return current_k, client_concepts, centroids, False
-
-        min_dist = float('inf')
-        merge_candidates = (-1, -1)
-
-        for i in range(len(effective_centroid_profiles)):
-            for j in range(i + 1, len(effective_centroid_profiles)):
-                if np.all(np.isinf(effective_centroid_profiles[i])) or np.all(np.isinf(effective_centroid_profiles[j])):
-                    continue
-                dist = self._calculate_inter_centroid_wasserstein_distance(effective_centroid_profiles[i], effective_centroid_profiles[j])
-                if dist < min_dist:
-                    min_dist = dist
-                    merge_candidates = (i, j)
-        
-        if merge_candidates != (-1,-1) and min_dist < self.dynamic_k_merge_wasserstein_threshold:
-            c1_idx, c2_idx = merge_candidates
-            print(f"Dynamic K: Merging clusters {c1_idx} and {c2_idx} (Wasserstein dist: {min_dist:.4f})")
-            
-            client_concepts[client_concepts == c2_idx] = c1_idx
-            client_concepts[client_concepts > c2_idx] = client_concepts[client_concepts > c2_idx] - 1
-            current_k -= 1
-            
-            new_centroids = np.zeros((current_k, client_embeddings.shape[1]))
-            for i in range(current_k):
-                cluster_client_indices = np.where(client_concepts == i)[0]
-                if len(cluster_client_indices) > 0:
-                    new_centroids[i] = np.mean(client_embeddings[cluster_client_indices], axis=0)
-
-            return current_k, client_concepts, new_centroids, True 
-        
-        return current_k, client_concepts, centroids, False 
-
-    def _attempt_cluster_split(self, current_k, client_embeddings, client_concepts, centroids, client_label_profiles_np):
-        """Phase 2: Attempt to split a cluster."""
-        if current_k >= self.dynamic_k_max:
-            return current_k, client_concepts, centroids, False 
-
-        max_dispersion = -1
-        split_candidate_idx = -1
-
-        for i in range(current_k):
-            cluster_client_indices = np.where(client_concepts == i)[0]
-            if len(cluster_client_indices) < self.dynamic_k_split_min_clients:
-                continue 
-            
-            embeddings_in_cluster = client_embeddings[cluster_client_indices]
-            current_cluster_centroid_embedding = np.mean(embeddings_in_cluster, axis=0)
-            dispersion = self._calculate_cluster_dispersion(embeddings_in_cluster, current_cluster_centroid_embedding)
-            if dispersion > max_dispersion:
-                max_dispersion = dispersion
-                split_candidate_idx = i
-        
-        if split_candidate_idx != -1 and max_dispersion > self.dynamic_k_split_dispersion_threshold:
-            print(f"Dynamic K: Attempting to split cluster {split_candidate_idx} (Dispersion: {max_dispersion:.4f})")
-            
-            indices_to_split = np.where(client_concepts == split_candidate_idx)[0]
-            embeddings_to_split = client_embeddings[indices_to_split]
-            
-            if len(embeddings_to_split) < self.dynamic_k_split_subcluster_k: 
-                 print(f"Dynamic K: Not enough samples in cluster {split_candidate_idx} to split into {self.dynamic_k_split_subcluster_k} sub-clusters.")
-                 return current_k, client_concepts, centroids, False
-
-            gmm_split = GaussianMixture(n_components=self.dynamic_k_split_subcluster_k, random_state=self.args.seed, covariance_type='diag')
-            try:
-                sub_labels = gmm_split.fit_predict(embeddings_to_split)
-            except ValueError:
-                print(f"Dynamic K: GMM fit failed for splitting cluster {split_candidate_idx}.")
-                return current_k, client_concepts, centroids, False
-
-            if len(np.unique(sub_labels)) < self.dynamic_k_split_subcluster_k:
-                print(f"Dynamic K: Split of cluster {split_candidate_idx} did not result in {self.dynamic_k_split_subcluster_k} distinct sub-clusters.")
-                return current_k, client_concepts, centroids, False
-
-            print(f"Dynamic K: Splitting cluster {split_candidate_idx} into {self.dynamic_k_split_subcluster_k} sub-clusters.")
-            
-            new_cluster_label_start = current_k
-            for sub_cluster_id in range(self.dynamic_k_split_subcluster_k):
-                sub_indices_original = indices_to_split[sub_labels == sub_cluster_id]
-                if sub_cluster_id == 0: # First sub-cluster reuses original label
-                    client_concepts[sub_indices_original] = split_candidate_idx
-                else:
-                    # Check if we exceed max_k before assigning new label
-                    if new_cluster_label_start + (sub_cluster_id -1) >= self.dynamic_k_max:
-                        print(f"Dynamic K: Splitting cluster {split_candidate_idx} aborted, would exceed dynamic_k_max.")
-                        # This requires a rollback or careful handling. For now, we abort the split.
-                        # To properly handle, we'd need to revert any partial relabeling or not proceed.
-                        # Simplest is to return False here if the *next* label would exceed max_k.
-                        return current_k, client_concepts, centroids, False # Abort split
-                    client_concepts[sub_indices_original] = new_cluster_label_start + (sub_cluster_id - 1)
-            
-            num_new_clusters_added = self.dynamic_k_split_subcluster_k - 1
-            current_k += num_new_clusters_added
-            
-            new_centroids = np.zeros((current_k, client_embeddings.shape[1]))
-            for i in range(current_k):
-                cluster_client_indices = np.where(client_concepts == i)[0]
-                if len(cluster_client_indices) > 0:
-                    new_centroids[i] = np.mean(client_embeddings[cluster_client_indices], axis=0)
-
-            return current_k, client_concepts, new_centroids, True 
-            
-        return current_k, client_concepts, centroids, False 
-
-    def _refine_k_iteratively(self, current_k, client_embeddings, client_concepts, centroids, client_label_profiles_np):
-        """Phase 2: Iteratively merge and split clusters."""
-        print(f"Dynamic K: Refining K iteratively. Start K: {current_k}")
-        for i in range(self.dynamic_k_refinement_iterations):
-            made_change_in_iteration = False
-            # Attempt merge
-            if current_k > self.dynamic_k_min:
-                new_k, new_concepts, new_centroids, merged = self._attempt_cluster_merge(
-                    current_k, client_embeddings, client_concepts, centroids, client_label_profiles_np
-                )
-                if merged:
-                    current_k, client_concepts, centroids = new_k, new_concepts, new_centroids
-                    made_change_in_iteration = True
-                    print(f"  Refinement iter {i+1}: Merged. New K: {current_k}")
-            
-            # Attempt split
-            if current_k < self.dynamic_k_max:
-                new_k, new_concepts, new_centroids, split = self._attempt_cluster_split(
-                    current_k, client_embeddings, client_concepts, centroids, client_label_profiles_np
-                )
-                if split:
-                    current_k, client_concepts, centroids = new_k, new_concepts, new_centroids
-                    made_change_in_iteration = True
-                    print(f"  Refinement iter {i+1}: Split. New K: {current_k}")
-            
-            if not made_change_in_iteration:
-                print(f"Dynamic K: Refinement converged after {i+1} iterations.")
-                break
-        
-        print(f"Dynamic K: Final K after refinement: {current_k}")
-        return current_k, client_concepts, centroids
 
     def _perform_label_wise_vwc_clustering_core(self, client_ids_to_cluster, all_client_label_data_subset, drift_status_subset, K_t, 
                                                 num_centroid_samples, vwc_max_iter, vwc_reg, vwc_drift_penalty_factor, current_seed,
@@ -1272,6 +1295,7 @@ class FedDCA(Server):
                 client_label_profiles = all_client_label_data_subset[client_id]
                 min_avg_distance = float('inf')
                 assigned_cluster_idx = 0 # Default to 0
+                # print(f"Client {client_id} label profiles for VWC: {client_label_profiles}")
                 
                 if not client_label_profiles: # Skip client if they have no profiles
                     new_assignments[client_id] = assigned_cluster_idx 
@@ -1296,7 +1320,7 @@ class FedDCA(Server):
                                 if distance != float('inf') and not np.isnan(distance):
                                     total_distance += distance
                                     num_common_labels += 1
-                    
+                        
                     # Average distance over common labels
                     if num_common_labels > 0:
                         avg_distance = total_distance / num_common_labels
@@ -1367,17 +1391,18 @@ class FedDCA(Server):
                                 padded_label_samples_list.extend([centroid_samples_for_label] * num_repeats_label)
                             if remainder_label > 0:
                                 padded_label_samples_list.append(centroid_samples_for_label[:remainder_label])
+                           
                             if padded_label_samples_list:
                                 centroid_samples_for_label = np.vstack(padded_label_samples_list)
                             # else: centroid_samples_for_label remains as is if padding fails
                         if centroid_samples_for_label.size > 0:
-                             current_centroid_for_k[label] = centroid_samples_for_label
+                             current_centroid_for_k[label] = copy.deepcopy(centroid_samples_for_label)
 
                 new_cluster_centroids_dicts[k_idx] = current_centroid_for_k
             cluster_centroids_vk_dicts = new_cluster_centroids_dicts
 
         # Final assignments for all clients passed in client_ids_to_cluster
-        # (including those who might have been filtered as inactive for clustering steps)
+        # (including those who might have been filtered as inactive for some reason)
         final_assignments_for_all_input_clients = {}
         for client_id in client_ids_to_cluster:
             if client_id in current_assignments: # current_assignments holds results for active_client_ids_in_subset
@@ -1405,6 +1430,50 @@ class FedDCA(Server):
         client_ids = list(client_label_profiles.keys())
         if not client_ids:
             print("VWC Orchestrator: No clients to process for clustering.")
+            # Ensure assignments are cleared or set to default if no clients
+            self.client_cluster_assignments = {cid: 0 for cid in self.client_cluster_assignments} # Or clear and handle downstream
+            self.cluster_classifiers.clear()
+            if hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                self.cluster_classifiers[0] = copy.deepcopy(self.global_model.head) # Ensure a global classifier exists
+            return
+
+        # Handle ablation for no LPs or no clustering
+        if self.ablation_no_lp or self.ablation_no_clustering or not any(client_label_profiles.values()):
+            print(f"VWC Orchestrator: Ablation active (no_lp: {self.ablation_no_lp}, no_clustering: {self.ablation_no_clustering}) or no LPs. Assigning all clients to cluster 0.")
+            for client_id in client_ids:
+                self.client_cluster_assignments[client_id] = 0
+            
+            self.cluster_classifiers.clear()
+            # Ensure a single global classifier model exists if clustering is disabled
+            if hasattr(self.global_model, 'head') and self.global_model.head is not None:
+                self.cluster_classifiers[0] = copy.deepcopy(self.global_model.head)
+                # Aggregate all client classifiers into this single global one if no_clustering is true
+                if self.ablation_no_clustering and self.client_classifier_params:
+                    all_clf_params = list(self.client_classifier_params.values())
+                    all_data_sizes = [self.clients[i].train_samples for i, cid in enumerate(self.client_classifier_params.keys()) if cid in [c.id for c in self.clients]] # Get datasize carefully
+                    if not all_data_sizes: all_data_sizes = [1.0] * len(all_clf_params)
+                    if len(all_data_sizes) != len(all_clf_params): all_data_sizes = [1.0] * len(all_clf_params) # Fallback if map fails
+
+                    if all_clf_params:
+                        aggregated_single_clf_params = {}
+                        first_head_keys_abl = all_clf_params[0].keys()
+                        for key in first_head_keys_abl:
+                            weighted_sum_abl = torch.zeros_like(all_clf_params[0][key].cpu(), dtype=torch.float32)
+                            total_weight_abl = 0.0
+                            for i, params_state_dict_abl in enumerate(all_clf_params):
+                                if key in params_state_dict_abl:
+                                    param_tensor_abl = params_state_dict_abl[key]
+                                    current_weight_abl = all_data_sizes[i] if i < len(all_data_sizes) else 1.0
+                                    weighted_sum_abl += param_tensor_abl.cpu().float() * current_weight_abl
+                                    total_weight_abl += current_weight_abl
+                        if total_weight_abl > 0:
+                            aggregated_single_clf_params[key] = weighted_sum_abl / total_weight_abl
+                        else:
+                            aggregated_single_clf_params[key] = all_clf_params[0][key].cpu()
+                        try:
+                            self.cluster_classifiers[0].load_state_dict(aggregated_single_clf_params)
+                        except RuntimeError as e:
+                            print(f"VWC Orchestrator (Ablation): Error loading state dict for single global classifier: {e}")
             return
 
         # Extract and prepare client data for clustering
@@ -1414,36 +1483,36 @@ class FedDCA(Server):
             if client_data is not None:
                 all_client_label_data[client_id] = client_data
 
-        # Step 1: Dynamic K determination (if enabled)
-        final_centroids = None # Initialize final_centroids
+        # # Step 1: Dynamic K determination (if enabled)
+        # final_centroids = None # Initialize final_centroids
 
-        if self.dynamic_k_enabled and self.round >= getattr(self.args, 'dynamic_k_start_round', 0):
-            print(f"\n--- Dynamic K Adjustment for VWC (Round {self.round}) ---")
-            estimated_k, estimated_concepts, estimated_centroids = self._initial_k_estimation(
-                client_embeddings, client_label_profiles_np, client_weights_np
-            )
+        # if self.dynamic_k_enabled and self.round >= getattr(self.args, 'dynamic_k_start_round', 0):
+        #     print(f"\n--- Dynamic K Adjustment for VWC (Round {self.round}) ---")
+        #     estimated_k, estimated_concepts, estimated_centroids = self._initial_k_estimation(
+        #         client_embeddings, client_label_profiles_np, client_weights_np
+        #     )
             
-            if estimated_concepts is not None and estimated_centroids is not None:
-                final_k, final_client_concepts, final_centroids = self._refine_k_iteratively(
-                    estimated_k, client_embeddings, estimated_concepts, estimated_centroids, client_label_profiles_np
-                )
-                self.vwc_K_t = final_k
-                client_concepts_after_dynamic_k = final_client_concepts
-            else:
-                print("Dynamic K: Critical failure in initial K estimation, using default VWC K_t.")
-                client_concepts_after_dynamic_k = None 
+        #     if estimated_concepts is not None and estimated_centroids is not None:
+        #         final_k, final_client_concepts, final_centroids = self._refine_k_iteratively(
+        #             estimated_k, client_embeddings, estimated_concepts, estimated_centroids, client_label_profiles_np
+        #         )
+        #                 self.vwc_K_t = final_k
+        #         client_concepts_after_dynamic_k = final_client_concepts
+        #     else:
+        #         print("Dynamic K: Critical failure in initial K estimation, using default VWC K_t.")
+        #         client_concepts_after_dynamic_k = None 
 
-            print(f"--- Dynamic K Adjustment Complete. Final K_t for this round: {self.vwc_K_t} ---")
+        #     print(f"--- Dynamic K Adjustment Complete. Final K_t for this round: {self.vwc_K_t} ---")
             
-        else: 
-            client_concepts_after_dynamic_k = None
+        # else: 
+        #     client_concepts_after_dynamic_k = None
 
         # Step 2: Run the core VWC clustering logic
         try:
             client_concepts, cluster_centroids_vk_dicts = self._perform_label_wise_vwc_clustering_core(
                 client_ids, all_client_label_data, client_drift_status, self.vwc_K_t, 
                 self.vwc_num_centroid_samples, self.vwc_max_iter, self.vwc_reg, 
-                self.vwc_drift_penalty_factor, current_seed, final_centroids
+                self.vwc_drift_penalty_factor, current_seed
             )
         except Exception as e:
             print(f"Error during VWC clustering: {e}")
@@ -1455,8 +1524,11 @@ class FedDCA(Server):
         self.cluster_classifiers.clear()
         client_id_to_datasize_map = {client.id: client.train_samples for client in self.clients if hasattr(client, 'train_samples')}
 
-        # Use self.vwc_K_t as the number of clusters
-        for k_idx in range(self.vwc_K_t): 
+        # Use self.vwc_K_t as the number of clusters (which might have been adjusted by dynamic K)
+        # Or, if ablation_no_clustering was true, K_t should effectively be 1 (handled above)
+        num_clusters_to_create = 1 if self.ablation_no_clustering else self.vwc_K_t
+
+        for k_idx in range(num_clusters_to_create): 
             clients_assigned_to_k = [cid for cid, assigned_k in self.client_cluster_assignments.items() if assigned_k == k_idx]
             
             if not clients_assigned_to_k:

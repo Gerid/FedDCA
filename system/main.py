@@ -613,8 +613,11 @@ if __name__ == "__main__":
                         help="FedCCFA使用聚类原型") # YAML: true
     parser.add_argument('-ci', "--cluster_interval", type=int, default=5, 
                        help="执行聚类的轮次间隔")
-    parser.add_argument('-vc', "--visualize_clusters", type=bool, default=True, # This was a bool, action='store_true' is better for flags
+    # parser.add_argument('-vc', "--visualize_clusters", type=bool, default=True, # This was a bool, action='store_true' is better for flags
+    #                    help="是否可视化聚类结果")
+    parser.add_argument("--visualize_clusters", action='store_true',# This was a bool, action='store_true' is better for flags
                        help="是否可视化聚类结果")
+
     parser.add_argument('-vi', "--vis_interval", type=int, default=10,
                        help="聚类可视化的轮次间隔")
     parser.add_argument('-vb', "--verbose", type=bool, default=True, # This was a bool, action='store_true' is better for flags
@@ -650,6 +653,18 @@ if __name__ == "__main__":
     parser.add_argument('--wandb_run_name_prefix', type=str, default="exp", help='Prefix for wandb run names')
     parser.add_argument('--save_global_model_to_wandb', action='store_true', help='Save global model to Wandb Artifacts')
     parser.add_argument('--save_results_to_wandb', action='store_true', help='Save H5 results to Wandb Artifacts')
+
+    # FedDCA specific arguments
+    parser.add_argument('-client_profile_noise_stddev', "--profile_noise_stddev", type=float, default=0.01, help="Stddev of Gaussian noise for client profiles")
+
+    # Ablation study parameters for FedDCA
+    parser.add_argument('--ablation_no_lp', action='store_true', help="FedDCA-NoLP: Disable label profiles. Clients send no LPs, server performs no LP-based drift detection or clustering.")
+    parser.add_argument('--ablation_no_drift_detect', action='store_true', help="FedDCA-NoDriftDetect: Disable explicit drift detection mechanism. Clustering might still occur based on LPs if available, but not dynamically triggered by detected drift.")
+    parser.add_argument('--ablation_no_clustering', action='store_true', help="FedDCA-NoCluster: Disable client clustering. A single global classifier is maintained.")
+    parser.add_argument('--ablation_lp_type', type=str, default="feature_based", choices=['feature_based', 'class_counts'], help="FedDCA-SimpleLP: Type of label profile to use ('feature_based' or 'class_counts').")
+    # Add other ablation flags as needed, e.g.:
+    # parser.add_argument('--ablation_global_fe_only', action='store_true', help="Use only a global feature extractor, no personalization even if clustered.")
+
 
     args = parser.parse_args()
 

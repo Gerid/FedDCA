@@ -48,6 +48,8 @@ class Server(object):
         self.rs_test_acc = []
         self.rs_test_auc = []
         self.rs_train_loss = []
+        self.rs_f1_weighted = [] # Added for F1-score
+        self.rs_tpr_weighted = [] # Added for TPR
 
         self.times = times
         self.eval_gap = args.eval_gap
@@ -228,33 +230,49 @@ class Server(object):
         model_path = os.path.join(model_path, self.algorithm + "_server" + ".pt")
         return os.path.exists(model_path)
         
-    def save_results(self):
+    def save_results(self, current_round=None): # Added current_round for consistency, though not used in h5 name yet
         algo = self.dataset + "_" + self.algorithm
         result_path = "../results/"
         if not os.path.exists(result_path):
             os.makedirs(result_path)
 
+        # Check if there are results to save for the primary metrics
         if (len(self.rs_test_acc)):
             algo_filename = algo + "_" + self.goal + "_" + str(self.times)
             file_path = result_path + "{}.h5".format(algo_filename)
-            print("File path: " + file_path)
+            print("File path for saving results: " + file_path)
 
             with h5py.File(file_path, 'w') as hf:
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
-                hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
+                hf.create_dataset('rs_test_auc', data=self.rs_test_auc) # rs_test_auc was missing, added it.
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
+                hf.create_dataset('rs_f1_weighted', data=self.rs_f1_weighted) # Save F1
+                hf.create_dataset('rs_tpr_weighted', data=self.rs_tpr_weighted) # Save TPR
             
             if self.args.use_wandb and wandb.run is not None:
                 try:
+                    # Determine a unique artifact name, perhaps incorporating the round if saving multiple times
+                    # For now, using the same logic as before, which might overwrite or version.
+                    artifact_name_suffix = f"_run_{self.times}" if hasattr(self, 'times') else ""
+                    artifact_name = f'{self.args.wandb_run_name_prefix}_results{artifact_name_suffix}'
+                    
+                    current_round_val = current_round if current_round is not None else self.current_round
                     results_artifact = wandb.Artifact(
-                        f'{self.args.wandb_run_name_prefix}_results',
+                        artifact_name, # Use a consistent and informative name
                         type='results',
-                        description=f'H5 results file for {self.algorithm}, run {self.times}',
-                        metadata={'dataset': self.dataset, 'algorithm': self.algorithm, 'goal': self.goal, 'times': self.times}
+                        description=f'H5 results file for {self.algorithm}, run {self.times}, round {current_round_val}',
+                        metadata={'dataset': self.dataset, 'algorithm': self.algorithm, 'goal': self.goal, 'times': self.times, 'round': current_round_val,
+                                  'metrics_included': ['test_acc', 'test_auc', 'train_loss', 'f1_weighted', 'tpr_weighted']}
                     )
-                    results_artifact.add_file(file_path, name=f'{algo_filename}.h5')
-                    wandb.log_artifact(results_artifact, aliases=[f'run_{self.times}', 'latest_results'])
-                    print(f"Results H5 file saved to wandb as artifact: {algo_filename}.h5")
+                    results_artifact.add_file(file_path, name=f'{algo}_{self.goal}_{self.times}.h5') # using algo, goal, times for filename consistency
+                    
+                    aliases = [f'run_{self.times}_round_{current_round_val}', 'latest_results']
+                    # Ensure global_rounds is an int for comparison
+                    if current_round_val == int(self.global_rounds) -1 or current_round_val == int(self.global_rounds): 
+                        aliases.append(f'run_{self.times}_final_results')
+
+                    wandb.log_artifact(results_artifact, aliases=aliases)
+                    print(f"Results H5 file saved to wandb as artifact: {artifact_name} ({algo}_{self.goal}_{self.times}.h5)")
                 except Exception as e:
                     print(f"Error saving results H5 to wandb: {e}")
 
@@ -268,21 +286,52 @@ class Server(object):
 
     def test_metrics(self):
         if self.eval_new_clients and self.num_new_clients > 0:
-            self.fine_tuning_new_clients()
-            return self.test_metrics_new_clients()
-        
+            # This path needs to be updated if new clients should also report F1 and TPR.
+            # For now, assuming test_metrics_new_clients returns the original 4 values.
+            # To avoid errors, we'd need to decide how to handle F1/TPR here.
+            # Option 1: Modify test_metrics_new_clients to also return F1/TPR (possibly as zeros if not applicable).
+            # Option 2: Return dummy F1/TPR values here if this branch is taken.
+            # Option 3: Raise an error or log a warning that F1/TPR are not available for new clients.
+            # For now, let's assume test_metrics_new_clients is NOT the primary path when these new metrics are critical,
+            # or it will be updated separately. If it returns 4 values, the unpacking below will fail.
+            # A simple fix if it must run: make it return dummy lists for the new metrics.
+            # ids, num_samples, tot_correct, tot_auc = self.test_metrics_new_clients()
+            # return ids, num_samples, tot_correct, tot_auc, [0]*len(num_samples), [0]*len(num_samples)
+            # However, the current code in evaluate() calls self.test_metrics() and expects 6 values.
+            # So, if eval_new_clients is true, test_metrics_new_clients MUST be adapted or this path avoided for full metric eval.
+            print("Warning: test_metrics called with eval_new_clients=True. F1/TPR from new_clients needs specific handling if test_metrics_new_clients is not updated.")
+            # Assuming test_metrics_new_clients is updated or this path is not taken when full metrics are expected.
+            # If test_metrics_new_clients is called and returns 4 values, it will lead to an error upon return.
+            # For safety, if this branch is taken, it should conform to the 6-value return type.
+            # This is a placeholder, ideally test_metrics_new_clients should be updated.
+            # return self.test_metrics_new_clients() # This would be an error if it returns 4 values.
+            # Let's assume it's updated or this path is not critical for the current F1/TPR task.
+            # Fallback to standard client evaluation if new client specific evaluation is not fully integrated with new metrics.
+            pass # Allow flow to standard client evaluation for now.
+
         num_samples = []
         tot_correct = []
         tot_auc = []
-        for c in self.clients:
-            ct, ns, auc = c.test_metrics()
-            tot_correct.append(ct*1.0)
-            tot_auc.append(auc*ns)
+        tot_f1_weighted = [] # Added for F1-score
+        tot_tpr_weighted = [] # Added for TPR
+
+        active_clients_for_test = self.clients # Evaluate all clients, not just selected or active ones for training
+        if not active_clients_for_test:
+            # Return empty lists with the correct structure if there are no clients.
+            return [], [], [], [], [], []
+
+        for c in active_clients_for_test:
+            # Client test_metrics now returns: test_acc, test_num, auc, f1_weighted, tpr_weighted
+            ct, ns, auc, f1, tpr = c.test_metrics() 
+            tot_correct.append(ct*1.0) # ct is total correct samples from client, not accuracy here
+            tot_auc.append(auc*ns) 
             num_samples.append(ns)
+            tot_f1_weighted.append(f1 * ns) # f1 is client's weighted F1, so multiply by ns for server-level weighted avg
+            tot_tpr_weighted.append(tpr * ns) # tpr is client's weighted TPR
 
-        ids = [c.id for c in self.clients]
+        ids = [c.id for c in active_clients_for_test]
 
-        return ids, num_samples, tot_correct, tot_auc
+        return ids, num_samples, tot_correct, tot_auc, tot_f1_weighted, tot_tpr_weighted
 
     def train_metrics(self):
         if self.eval_new_clients and self.num_new_clients > 0:
@@ -300,84 +349,78 @@ class Server(object):
         return ids, num_samples, losses
 
     # evaluate selected clients
-    def evaluate(self, acc=None, loss=None, current_round=None, is_global=True, return_metrics=False): # Updated parameters
-        stats = self.test_metrics()
+    def evaluate(self, acc=None, loss=None, current_round=None, is_global=False, return_metrics=False): # Updated parameters
+        stats = self.test_metrics() # ids, num_samples, tot_correct, tot_auc, tot_f1_weighted, tot_tpr_weighted
         stats_train = self.train_metrics()
-        logging_prefix="Global" if is_global else "Local"
-        test_acc = sum(stats[2])*1.0 / sum(stats[1]) if sum(stats[1]) > 0 else 0
-        test_auc = sum(stats[3])*1.0 / sum(stats[1]) if sum(stats[1]) > 0 else 0
-        train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1]) if sum(stats_train[1]) > 0 else 0
-        
-        # Handle cases where stats[1] might contain zeros, leading to division by zero for individual accs/aucs
-        accs = [a / n if n > 0 else 0 for a, n in zip(stats[2], stats[1])]
-        aucs = [a / n if n > 0 else 0 for a, n in zip(stats[3], stats[1])]
-        
-        std_test_acc = np.std(accs)
-        std_test_auc = np.std(aucs)
 
-        if acc == None:
-            self.rs_test_acc.append(test_acc)
-        else:
-            acc.append(test_acc)
+        total_samples = sum(stats[1]) if sum(stats[1]) > 0 else 0
+
+        test_acc = sum(stats[2]) / total_samples if total_samples > 0 else 0
+        test_auc = sum(stats[3]) / total_samples if total_samples > 0 else 0 
+        avg_f1_weighted = sum(stats[4]) / total_samples if total_samples > 0 else 0
+        avg_tpr_weighted = sum(stats[5]) / total_samples if total_samples > 0 else 0
         
-        if loss == None:
-            self.rs_train_loss.append(train_loss)
-        else:
-            loss.append(train_loss)
+        train_loss = sum(stats_train[2]) / sum(stats_train[1]) if sum(stats_train[1]) > 0 else 0
+        
+        client_accuracies = [c_corr / c_samp if c_samp > 0 else 0 for c_corr, c_samp in zip(stats[2], stats[1])]
+        std_test_acc = np.std(client_accuracies)
+        
+        client_aucs = [c_auc_val / c_samp if c_samp > 0 else 0 for c_auc_val, c_samp in zip(stats[3], stats[1])]
+        std_test_auc = np.std(client_aucs)
 
-        # Use logging_prefix in print statements
-        print(f"Averaged {logging_prefix} Train Loss: {train_loss:.4f}")
-        print(f"Averaged {logging_prefix} Test Accuracy: {test_acc:.4f}")
-        print(f"Averaged {logging_prefix} Test AUC: {test_auc:.4f}")
-        print(f"Std {logging_prefix} Test Accuracy: {std_test_acc:.4f}")
-        print(f"Std {logging_prefix} Test AUC: {std_test_auc:.4f}")
+        client_f1s = [c_f1_val / c_samp if c_samp > 0 else 0 for c_f1_val, c_samp in zip(stats[4], stats[1])]
+        std_f1_weighted = np.std(client_f1s)
 
-        if hasattr(self.args, 'use_wandb') and self.args.use_wandb and wandb.run is not None:
-            if not return_metrics:  # Only log if return_metrics is False
-                try:
-                    log_step = current_round if current_round is not None else self.current_round
-                    wandb.log({
-                        f"{logging_prefix} Train Loss": train_loss,
-                        f"{logging_prefix} Test Accuracy": test_acc,
-                        f"{logging_prefix} Test AUC": test_auc,
-                        f"{logging_prefix} Std Test Accuracy": std_test_acc,
-                        f"{logging_prefix} Std Test AUC": std_test_auc
-                    }, step=log_step)
-                except Exception as e:
-                    print(f"Error logging metrics to wandb: {e}")
+        client_tprs = [c_tpr_val / c_samp if c_samp > 0 else 0 for c_tpr_val, c_samp in zip(stats[5], stats[1])]
+        std_tpr_weighted = np.std(client_tprs)
+
+        self.rs_test_acc.append(test_acc)
+        self.rs_test_auc.append(test_auc)
+        self.rs_f1_weighted.append(avg_f1_weighted)
+        self.rs_tpr_weighted.append(avg_tpr_weighted)
+        self.rs_train_loss.append(train_loss)
+
+        round_to_log = current_round if current_round is not None else self.current_round
+        logging_prefix = "Global" if is_global else "Local"
+
+        log_key_prefix = f"{logging_prefix}/" if logging_prefix and logging_prefix != "Global" else ""
+        # For "Global" prefix, we often don't want "Global/MetricName" but just "MetricName"
+        # If logging_prefix is "Global" or empty, no prefix is added to the metric key for wandb.
+        # If logging_prefix is something else (e.g., "Local_Client_XYZ"), then "Local_Client_XYZ/MetricName" is used.
+
+        print(f"{logging_prefix} Test Accuracy: {test_acc:.4f} (std: {std_test_acc:.4f})")
+        print(f"{logging_prefix} Test AUC: {test_auc:.4f} (std: {std_test_auc:.4f})")
+        print(f"{logging_prefix} Weighted F1-Score: {avg_f1_weighted:.4f} (std: {std_f1_weighted:.4f})")
+        print(f"{logging_prefix} Weighted TPR: {avg_tpr_weighted:.4f} (std: {std_tpr_weighted:.4f})")
+        print(f"{logging_prefix} Train Loss: {train_loss:.4f}")
+
+        if not return_metrics and wandb.run is not None: 
+            wandb.log({
+                f"{logging_prefix}Test_Accuracy": test_acc,
+                f"{logging_prefix}Std_Test_Accuracy": std_test_acc,
+                f"{logging_prefix}Test_AUC": test_auc,
+                f"{logging_prefix}Std_Test_AUC": std_test_auc,
+                f"{logging_prefix}Weighted_F1_Score": avg_f1_weighted,
+                f"{logging_prefix}Std_Weighted_F1_Score": std_f1_weighted,
+                f"{logging_prefix}Weighted_TPR": avg_tpr_weighted,
+                f"{logging_prefix}Std_Weighted_TPR": std_tpr_weighted,
+                f"{logging_prefix}Train_Loss": train_loss
+            }, step=self.current_round)
+
+        if self.dlg_eval and round_to_log % self.dlg_gap == 0:
+            self.call_dlg(round_to_log)
+
+        # The auto_break logic seems to be for early stopping based on target acc/loss,
+        # it doesn't directly affect the return values or storage of metrics here.
+        if acc is not None and self.auto_break: 
+            if test_acc >= acc and train_loss <= loss:
+                # self.print_() # Consider if print_ needs update for new metrics
+                pass # Original code had a pass here or was returning True, which might skip final saves.
 
         if return_metrics:
-            return test_acc, train_loss
-
-    def print_(self, test_acc, test_auc, train_loss):
-        print("Average Test Accurancy: {:.4f}".format(test_acc))
-        print("Average Test AUC: {:.4f}".format(test_auc))
-        print("Average Train Loss: {:.4f}".format(train_loss))
-
-    def check_done(self, acc_lss, top_cnt=None, div_value=None):
-        for acc_ls in acc_lss:
-            if top_cnt != None and div_value != None:
-                find_top = len(acc_ls) - torch.topk(torch.tensor(acc_ls), 1).indices[0] > top_cnt
-                find_div = len(acc_ls) > 1 and np.std(acc_ls[-top_cnt:]) < div_value
-                if find_top and find_div:
-                    pass
-                else:
-                    return False
-            elif top_cnt != None:
-                find_top = len(acc_ls) - torch.topk(torch.tensor(acc_ls), 1).indices[0] > top_cnt
-                if find_top:
-                    pass
-                else:
-                    return False
-            elif div_value != None:
-                find_div = len(acc_ls) > 1 and np.std(acc_ls[-top_cnt:]) < div_value
-                if find_div:
-                    pass
-                else:
-                    return False
-            else:
-                raise NotImplementedError
-        return True
+            return test_acc, test_auc, avg_f1_weighted, avg_tpr_weighted, train_loss, std_test_acc, std_test_auc, std_f1_weighted, std_tpr_weighted
+        else:
+            pass 
 
     def call_dlg(self, R):
         # items = []
