@@ -247,7 +247,7 @@ class FedDCA(Server):
 
             self.selected_clients = self.select_clients()
             self.apply_drift_transformation()
-            send_models_start_time = time.time(gg
+            send_models_start_time = time.time()
             self.send_models()
             server_compute_time_this_round += (time.time() - send_models_start_time)
             if self.current_round % self.args.eval_gap == 0:
