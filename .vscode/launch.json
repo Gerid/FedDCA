@@ -56,12 +56,14 @@
                 "-t",
                 "2",
                 "-worker",
-                "2",
+                "0",
                 // "--visualize_clusters",
                 // "--save_global_model_to_wandb",
                 // "--save_results_to_wandb",
                 // "--simulate_drift", //Simulate data drift
-                "--use_drift_dataset"  //Use a separate drift dataset
+                "--use_drift_dataset",  //Use a separate drift dataset
+                "--ablation_lp_type",
+                "class_counts"
             ]
         },
 

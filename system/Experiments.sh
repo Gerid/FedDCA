@@ -192,11 +192,22 @@ done
 echo "完成参数影响研究: dca_target_num_clusters"
 echo "====================================================="
 
+# --- 参数影响研究: dca_vwc_K_t (VWC 迭代次数) ---
+echo "开始参数影响研究: dca_vwc_K_t"
+WANDB_GROUP_VWC_KT="Impact_VWC_Kt"
+for vwc_kt_val in 2 3 5 10; do
+    run_experiment "$WANDB_GROUP_VWC_KT" "VWCKt_${vwc_kt_val}" \
+        "--dca_vwc_K_t" "$vwc_kt_val" \
+        "-go" "ImpactVWCKt_${vwc_kt_val}"
+done
+echo "完成参数影响研究: dca_vwc_K_t"
+echo "====================================================="
+
 # --- 运行用户提供的示例配置 (稍作调整以适应脚本) ---
 echo "运行用户示例配置"
 WANDB_GROUP_USER_EXAMPLE="UserExample_FromCmd"
 run_experiment "$WANDB_GROUP_USER_EXAMPLE" "Cifar100_DriftDataset_Cmd" \
-    "-data" "Cifar100" \
+    "-data" "Cifar100" gg
     "-m" "cnn" \
     "-algo" "FedDCA" \
     "-gr" "200" \

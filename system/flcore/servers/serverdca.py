@@ -199,7 +199,8 @@ class FedDCA(Server):
         # self.vwc_num_samples_concept = args.vwc_num_samples_concept if hasattr(args, 'vwc_num_samples_concept') else 30 
         self.vwc_num_centroid_samples = args.vwc_num_centroid_samples if hasattr(args, 'vwc_num_centroid_samples') else 30 # User had this
         self.vwc_max_iter = args.vwc_max_iter if hasattr(args, 'vwc_max_iter') else 10
-        self.vwc_K_t = args.vwc_K_t if hasattr(args, 'vwc_K_t') else 3 # User's default for K_t
+        self.vwc_K_t = args.dca_vwc_K_t if hasattr(
+            args, 'dca_vwc_K_t') else 3  # User's default for K_t
         self.vwc_drift_penalty_factor = args.vwc_drift_penalty_factor if hasattr(args, 'vwc_drift_penalty_factor') else 0.5
         # self.vwc_potential_update_factor = args.vwc_potential_update_factor if hasattr(args, 'vwc_potential_update_factor') else self.vwc_reg 
         
@@ -246,7 +247,7 @@ class FedDCA(Server):
 
             self.selected_clients = self.select_clients()
             self.apply_drift_transformation()
-            send_models_start_time = time.time()
+            send_models_start_time = time.time(gg
             self.send_models()
             server_compute_time_this_round += (time.time() - send_models_start_time)
             if self.current_round % self.args.eval_gap == 0:
