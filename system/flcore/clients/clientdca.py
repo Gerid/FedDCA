@@ -53,7 +53,6 @@ class clientDCA(Client):
         self.loss_fn_per_sample = nn.CrossEntropyLoss(reduction='none').to(self.device)
         
         self.current_round_training_outputs = [] 
-        self.intermediate_outputs = [] # Used by the forward hook to store features of a batch
         self.hook_handle = None # To manage the forward hook
 
         try:

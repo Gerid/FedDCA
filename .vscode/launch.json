@@ -27,11 +27,11 @@
             ] */
             "args": [
                 "-data",
-                "Cifar100_100_clients",
+                "Cifar100",
                 "-m",
                 "cnn",
                 "-algo",
-                "FedIFCA",
+                "FedDCA",
                 "-gr",
                 "20",
                 "-ls",
@@ -47,7 +47,7 @@
                 "-eg",
                 "10",
                 "-nc",
-                "100",
+                "20",
                 "--clustering_method",
                 "label_conditional",
                 // "--use_wandb",

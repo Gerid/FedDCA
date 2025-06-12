@@ -24,8 +24,8 @@ class Client(object):
         self.device = args.device
         self.id = id  # integer
         self.save_folder_name = args.save_folder_name
-        self.train_data = read_client_data(self.dataset, self.id, is_train=True, base_dir=args.data_base_dir)
-        self.test_data = read_client_data(self.dataset, self.id, is_train=False, base_dir=args.data_base_dir)
+        self.train_data = read_client_data(self.dataset, self.id, is_train=True)
+        self.test_data = read_client_data(self.dataset, self.id, is_train=False)
 
         self.global_test_id = 0
 
