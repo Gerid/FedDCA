@@ -588,8 +588,8 @@ if __name__ == "__main__":
     parser.add_argument('-mt', "--merge_threshold", type=float, default=0.05)
     parser.add_argument('-gs', "--gmm_samples", type=int, default=100)
     parser.add_argument('-cm', "--clustering_method", type=str, default="enhanced_label",
-                        choices=["vwc", "label_conditional", "enhanced_label"],
-                       help="聚类方法: vwc (原始变分Wasserstein聚类) 或 label_conditional (基于标签的条件Wasserstein聚类)")
+                        choices=["vwc", "label_conditional", "enhanced_label", "ground_truth"], # Updated choices
+                       help="聚类方法: vwc (原始变分Wasserstein聚类) 或 label_conditional (基于标签的条件Wasserstein聚类) 或 ground_truth (使用真实标签进行聚类，用于调试)")
     # FedCCFA
     parser.add_argument('-cle', "--clf_epochs", type=int, default=1, 
                         help="FedCCFA分类器训练轮数") # YAML: 1
@@ -650,6 +650,14 @@ if __name__ == "__main__":
     parser.add_argument('--ftau', type=float, default=1e-8,
                         help='Flash数值稳定常数')
 
+    # New FedDCA specific arguments
+    parser.add_argument('--dca_ot_reg', type=float, default=0.1, help="FedDCA: Optimal transport regularization coefficient for VWC.")
+    parser.add_argument('--dca_vwc_reg', type=float, default=0.1, help="FedDCA: Variational Wasserstein Clustering (VWC) regularization term for feature extractor.")
+    parser.add_argument('--dca_target_num_clusters', type=int, default=None, help="FedDCA: Target number of clusters. If None, determined dynamically or by num_clusters argument.")
+    parser.add_argument('--drift_detection_threshold', type=float, default=0.5, help="FedDCA: Threshold for concept drift detection based on label profiles.")
+    parser.add_argument('--cluster_update_freq', type=int, default=10, help="FedDCA: Frequency (in global rounds) for updating client-cluster assignments.")
+    parser.add_argument('--num_profile_samples', type=int, default=1000, help="FedDCA: Number of samples to use for constructing label/feature profiles (e.g., for GMM).")
+
     # Weights & Biases arguments
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
     parser.add_argument('--wandb_project', type=str, default="FedDCA", help='Wandb project name')
@@ -659,18 +667,22 @@ if __name__ == "__main__":
     parser.add_argument('--wandb_run_name_prefix', type=str, default="exp", help='Prefix for wandb run names')
     parser.add_argument('--save_global_model_to_wandb', action='store_true', help='Save global model to Wandb Artifacts')
     parser.add_argument('--save_results_to_wandb', action='store_true', help='Save H5 results to Wandb Artifacts')
+    parser.add_argument('--wandb_tags', type=str, nargs='*', default=None, help='List of tags for the wandb run')
+    parser.add_argument('--wandb_notes', type=str, default=None, help='Notes for the wandb run')
+    parser.add_argument('--wandb_group', type=str, default=None, help='Group for the wandb run (e.g., experiment name)')
 
-    # FedDCA specific arguments
+    # FedDCA specific arguments (this one was already added in a previous step, ensuring it's here)
     parser.add_argument('-client_profile_noise_stddev', "--profile_noise_stddev", type=float, default=0.01, help="Stddev of Gaussian noise for client profiles")
 
     # Ablation study parameters for FedDCA
     parser.add_argument('--ablation_no_lp', action='store_true', help="FedDCA-NoLP: Disable label profiles. Clients send no LPs, server performs no LP-based drift detection or clustering.")
     parser.add_argument('--ablation_no_drift_detect', action='store_true', help="FedDCA-NoDriftDetect: Disable explicit drift detection mechanism. Clustering might still occur based on LPs if available, but not dynamically triggered by detected drift.")
     parser.add_argument('--ablation_no_clustering', action='store_true', help="FedDCA-NoCluster: Disable client clustering. A single global classifier is maintained.")
-    parser.add_argument('--ablation_lp_type', type=str, default="feature_based", choices=['feature_based', 'class_counts'], help="FedDCA-SimpleLP: Type of label profile to use ('feature_based' or 'class_counts').")
+    parser.add_argument('--ablation_lp_type', type=str, default="feature_based", choices=['feature_based', 'class_counts', 'raw_features'], help="FedDCA-LPType: Type of label profile to use ('feature_based', 'class_counts', or 'raw_features').") # Updated choices
     # Add other ablation flags as needed, e.g.:
-    # parser.add_argument('--ablation_global_fe_only', action='store_true', help="Use only a global feature extractor, no personalization even if clustered.")
-
+    parser.add_argument('--ablation_global_fe_only', action='store_true', help="FedDCA-GlobalFE: Use only a global feature extractor, no personalization even if clustered.")
+    parser.add_argument('--ablation_fixed_clusters', type=int, default=0, help="FedDCA-FixedK: If > 0, initializes with K fixed clusters and does not change them. (0 means dynamic clustering)")
+    parser.add_argument('--ablation_no_reinit_clf', action='store_true', help="FedDCA-NoReinit: Do not reinitialize classifiers upon cluster changes.")
 
     args = parser.parse_args()
 

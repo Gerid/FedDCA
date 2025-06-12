@@ -56,7 +56,7 @@
                 "-t",
                 "2",
                 "-worker",
-                "8",
+                "2",
                 // "--visualize_clusters",
                 // "--save_global_model_to_wandb",
                 // "--save_results_to_wandb",
