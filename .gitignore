@@ -56,6 +56,7 @@ logs/
 *.xlsx
 *.xls
 *.pdf
+system/*.json
 
 # 临时文件
 .ipynb_checkpoints

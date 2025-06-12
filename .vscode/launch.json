@@ -27,11 +27,11 @@
             ] */
             "args": [
                 "-data",
-                "Cifar100",
+                "Cifar100_100_clients",
                 "-m",
                 "cnn",
                 "-algo",
-                "FedDCA",
+                "FedIFCA",
                 "-gr",
                 "20",
                 "-ls",
@@ -47,7 +47,7 @@
                 "-eg",
                 "10",
                 "-nc",
-                "20",
+                "100",
                 "--clustering_method",
                 "label_conditional",
                 // "--use_wandb",
@@ -55,7 +55,9 @@
                 "1", 
                 "-t",
                 "2",
-                "--visualize_clusters",
+                "-worker",
+                "8",
+                // "--visualize_clusters",
                 // "--save_global_model_to_wandb",
                 // "--save_results_to_wandb",
                 // "--simulate_drift", //Simulate data drift

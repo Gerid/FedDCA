@@ -499,6 +499,12 @@ if __name__ == "__main__":
                         help="Total number of clients")
     parser.add_argument('-pv', "--prev", type=int, default=0,
                         help="Previous Running times")
+    parser.add_argument('-worker', "--num_workers", type=int, default=0,
+                        help="Number of workers for DataLoader")
+    parser.add_argument('-pm', "--pin_memory", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable pin_memory for DataLoader")
+    parser.add_argument('--use_amp', action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable Automatic Mixed Precision training")
     parser.add_argument('-t', "--times", type=int, default=1,
                         help="Running times")
     parser.add_argument('-eg', "--eval_gap", type=int, default=1,

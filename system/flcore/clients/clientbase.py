@@ -24,8 +24,45 @@ class Client(object):
         self.device = args.device
         self.id = id  # integer
         self.save_folder_name = args.save_folder_name
-        self.train_data = read_client_data(self.dataset, self.id, is_train=True)
-        self.test_data = read_client_data(self.dataset, self.id, is_train=False)
+        self.train_data = read_client_data(self.dataset, self.id, is_train=True, base_dir=args.data_base_dir)
+        self.test_data = read_client_data(self.dataset, self.id, is_train=False, base_dir=args.data_base_dir)
+
+        self.global_test_id = 0
+
+        # 添加对概念漂移数据集的支持
+        self.current_iteration = 0
+        self.drift_data_dir = args.drift_data_dir if hasattr(args, 'drift_data_dir') else None
+        self.use_drift_dataset = args.use_drift_dataset if hasattr(args, 'use_drift_dataset') else False
+        self.max_iterations = args.max_iterations if hasattr(args, 'max_iterations') else 200
+          # 模拟漂移相关参数
+        self.simulate_drift = args.simulate_drift if hasattr(args, 'simulate_drift') else False
+        self.increment_iteration = args.increment_iteration if hasattr(args, 'increment_iteration') else True
+        self.shared_concepts = []
+        self.client_concepts = []
+        self.current_concept_id = -1
+        self.current_concept = None
+        self.drift_patterns = None
+        self.drift_schedule = None
+        self.drift_args = None
+        self.use_shared_concepts = False
+        self.gradual_window = 10
+        self.recurring_period = 30
+        self.all_concepts = None
+        self.drift_type = None
+        self.drift_points = None
+        self.drift_patterns = None
+        self.drift_schedule = None
+        self.drift_args = None
+        self.use_shared_concepts = False
+        self.gradual_window = 10
+        self.recurring_period = 30
+        self.all_concepts = None
+        self.drift_type = None
+        self.drift_points = None
+
+        self.num_classes = args.num_classes
+        self.num_workers = args.num_workers
+        self.pin_memory = args.pin_memory
 
         self.global_test_id = 0
 
@@ -87,7 +124,9 @@ class Client(object):
         self.learning_rate_scheduler = torch.optim.lr_scheduler.ExponentialLR(
             optimizer=self.optimizer, gamma=args.learning_rate_decay_gamma
         )
-        self.learning_rate_decay = args.learning_rate_decay    
+        self.learning_rate_decay = args.learning_rate_decay
+        self.num_workers = args.num_workers
+        self.pin_memory = args.pin_memory
 
     def update_iteration(self, new_iteration):
         """更新当前迭代计数器，用于概念漂移数据集"""
@@ -104,20 +143,16 @@ class Client(object):
         """加载训练数据，支持概念漂移数据集"""
         if batch_size == None:
             batch_size = self.batch_size
-        
-        # if hasattr(self, 'use_drift_dataset'):
-            # self.apply_drift_transformation(is_train=True)
-        return DataLoader(self.train_data, batch_size, drop_last=True, shuffle=True)
+        # return DataLoader(self.train_data, batch_size, drop_last=True, shuffle=True)
+        return DataLoader(self.train_data, batch_size, drop_last=True, shuffle=True, num_workers=self.num_workers, pin_memory=self.pin_memory)
 
     def load_test_data(self, batch_size=None):
         """加载测试数据，支持概念漂移数据集"""
         if batch_size == None:
             batch_size = self.batch_size
-            
-        # if hasattr(self, 'use_drift_dataset'):
-            # self.apply_drift_transformation(is_train=False)
-        return DataLoader(self.test_data, batch_size, drop_last=False, shuffle=True)
-            
+        # return DataLoader(self.test_data, batch_size, drop_last=False, shuffle=True)
+        return DataLoader(self.test_data, batch_size, drop_last=False, shuffle=True, num_workers=self.num_workers, pin_memory=self.pin_memory)
+
     def set_parameters(self, params_dict, part=None):
         """Sets the parameters of the model or parts of it.
 

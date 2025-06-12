@@ -136,7 +136,8 @@ class FedIFCA(Server):
             
             # 向客户端发送其对应集群的全局模型
             cluster_id = client.cluster_identity
-            client.set_parameters(self.global_models[cluster_id])
+            # client.set_parameters(self.global_models[cluster_id])
+            client.set_parameters(self.global_models[cluster_id].state_dict()) # Pass state_dict instead of the model
             
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += time.time() - start_time
