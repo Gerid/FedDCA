@@ -381,7 +381,7 @@ class Server(object):
         self.rs_train_loss.append(train_loss)
 
         round_to_log = current_round if current_round is not None else self.current_round
-        logging_prefix = "Global" if is_global else "Local"
+        logging_prefix = "Global_" if is_global else "Local_"
 
         log_key_prefix = f"{logging_prefix}/" if logging_prefix and logging_prefix != "Global" else ""
         # For "Global" prefix, we often don't want "Global/MetricName" but just "MetricName"
