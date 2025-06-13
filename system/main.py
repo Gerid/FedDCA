@@ -519,6 +519,8 @@ if __name__ == "__main__":
     parser.add_argument('-bnpc', "--batch_num_per_client", type=int, default=2)
     parser.add_argument('-nnc', "--num_new_clients", type=int, default=0)
     parser.add_argument('-fte', "--fine_tuning_epoch", type=int, default=0)
+    parser.add_argument('--output_suffix', type=str, default="", 
+                        help='Suffix for output directory and WandB run name to distinguish experiments.')
     # practical
     parser.add_argument('-cdr', "--client_drop_rate", type=float, default=0.0,
                         help="Rate for clients that train but drop out")
@@ -702,14 +704,16 @@ if __name__ == "__main__":
 
     # --- Construct complex_drift_config from args ---
     if args.complex_drift_scenario:
-        args.complex_drift_config = {
-            "scenario_type": args.complex_drift_scenario,
-            "base_epoch": args.drift_base_epoch,
-            "stagger_interval": args.drift_stagger_interval,
-            "partial_percentage": args.drift_partial_percentage
+        # Ensure drift_config is a dictionary and passed to the server via args
+        args.drift_config = {
+            "complex_drift_scenario": args.complex_drift_scenario,
+            "drift_base_epoch": args.drift_base_epoch,
+            "drift_stagger_interval": args.drift_stagger_interval,
+            "drift_partial_percentage": args.drift_partial_percentage,
+            "superclass_map_path": args.superclass_map_path
         }
     else:
-        args.complex_drift_config = None
+        args.drift_config = None
     # --- End Construct complex_drift_config ---
 
     if args.device_id != "cpu":

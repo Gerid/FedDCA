@@ -68,6 +68,10 @@ class Server(object):
 
         self.current_round = 0
 
+        self.eval_interval = args.eval_interval
+        self.num_clients = args.num_clients
+        self.drift_config = getattr(args, 'drift_config', None) # Ensure drift_config is initialized
+
     def set_clients(self, clientObj):
         # Setup clients with correct id parameter
         for i, train_slow, send_slow in zip(range(self.num_clients), self.train_slow_clients, self.send_slow_clients):
@@ -147,7 +151,7 @@ class Server(object):
         for client in self.clients:
             start_time = time.time()
             
-            client.set_parameters(self.global_model)
+            client.set_parameters(self.global_model.state_dict())  
 
             client.send_time_cost['num_rounds'] += 1
             client.send_time_cost['total_cost'] += 2 * (time.time() - start_time)
@@ -510,16 +514,41 @@ class Server(object):
         return ids, num_samples, tot_correct, tot_auc
 
     def apply_drift_transformation(self):
-        """统一的概念漂移应用方法，由参数控制漂移时间点"""
-        drift_round = getattr(self.args, 'drift_round', 100)  # 默认第100轮
-        if self.current_round == drift_round:  # 使用配置的漂移轮次
-            for client in self.selected_clients:
-                if hasattr(client, 'use_drift_dataset') and client.use_drift_dataset:
-                    if hasattr(client, 'apply_drift_transformation'):
-                        print(f"Server: Applying drift for client {client.id} at round {self.current_round}")
-                        # Apply drift to both training and testing datasets on the client
-                        client.apply_drift_transformation()
-                    else:
-                        print(f"Warning: Client {client.id} is configured to use drift but does not have apply_drift_transformation method.")
+        # This method is called by server implementations (like FedAvg, FedIFCA)
+        # The actual data transformation happens on the client side.
+        # This server method can log or coordinate based on self.drift_config.
+        if self.drift_config and self.drift_config.get("complex_drift_scenario"):
+            scenario = self.drift_config.get("complex_drift_scenario")
+            base_epoch = self.drift_config.get("drift_base_epoch", 0)
+            
+            # Log that a complex drift scenario is active if current round is at or after base_epoch
+            if self.current_round >= base_epoch:
+                print(f"Server: Round {self.current_round}. Complex drift scenario '{scenario}' is active (base epoch {base_epoch}).")
+                if hasattr(self, 'selected_clients') and self.selected_clients:
+                    for client in self.selected_clients:
+                        # Further logic could determine if drift *specifically* applies to this client in this round
+                        # (e.g., for staggered or partial drift).
+                        # The client itself will make the final determination based on its ID and the full drift_config.
+                        # This server log indicates the server is aware the client *might* be drifting.
+                        print(f"Server: Instructing/expecting client {client.id} to consider drift at round {self.current_round} for scenario '{scenario}'.")
+                else:
+                    print(f"Server: Round {self.current_round}. Complex drift scenario '{scenario}' active, but no clients selected or 'selected_clients' not available at this logging point.")
+            # else:
+            # print(f"Server: Round {self.current_round}. Complex drift scenario '{scenario}' configured, but base epoch {base_epoch} not yet reached.")
+        # else:
+            # print(f"Server: Round {self.current_round}. No complex drift scenario active or drift_config not set.")
+
+    def aggregate_parameters(self, selected_clients=None):
+        assert (len(self.uploaded_models) > 0)
+
+        if selected_clients is None:
+            selected_clients = self.uploaded_models  # Default to all uploaded models if none specified
+
+        self.global_model = copy.deepcopy(selected_clients[0])
+        for param in self.global_model.parameters():
+            param.data.zero_()
+            
+        for w, client_model in zip(self.uploaded_weights, selected_clients):
+            self.add_parameters(w, client_model)
 
 
