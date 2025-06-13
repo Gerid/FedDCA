@@ -54,13 +54,23 @@ run_experiment() {
 
         # FedDCA 特有参数的默认值
         ["--num_profile_samples"]="30"
-        ["--ablation_lp_type"]="feature_based" # 'feature_based' 或 'class_counts'
-        ["--ablation_no_lp"]="PRESENCE_ONLY_FALSE" # 默认: ablation_no_lp is False
+        # ["--ablation_lp_type"]="feature_based" # 'feature_based' 或 'class_counts' # Commented out as it seems specific to an ablation not directly used in complex drift base config
+        # ["--ablation_no_lp"]="PRESENCE_ONLY_FALSE" # 默认: ablation_no_lp is False # Commented out
         ["--dca_ot_reg"]="0.1"
         ["--dca_vwc_reg"]="0.1"
         ["--dca_target_num_clusters"]="3"
+        ["--dca_vwc_K_t"]="5" # Default for VWC Kt
         ["--clustering_method"]="label_conditional"
         ["-go"]="feddca_study" # 实验目标/标签
+
+        # --- Complex Concept Drift 参数默认值 ---
+        # 这些通常会在调用 run_experiment 时被覆盖，但可以设置一个基础默认值（例如，不漂移）
+        ["--complex_drift_scenario"]="None" # 默认不使用复杂漂移
+        ["--drift_base_epoch"]="100"
+        ["--drift_stagger_interval"]="10"
+        ["--drift_partial_percentage"]="0.1"
+        ["--superclass_map_path"]="../dataset/cifar100_superclass_map.json" # 假设的默认路径
+        # --- End Complex Concept Drift 参数默认值 ---
 
         # 其他 action='store_true' 标志的默认状态 (False)
         ["--use_drift_dataset"]="PRESENCE_ONLY_FALSE"
@@ -201,6 +211,65 @@ for vwc_kt_val in 2 3 5 10; do
         "-go" "ImpactVWCKt_${vwc_kt_val}"
 done
 echo "完成参数影响研究: dca_vwc_K_t"
+echo "====================================================="
+
+# --- 复杂概念漂移场景实验 ---
+echo "开始复杂概念漂移场景实验"
+SUPERCLASS_MAP_FILE="../dataset/cifar100_superclass_map.json" # 定义超类映射文件路径
+
+# 场景 1.1: 交错突变类内超类标签漂移
+WANDB_GROUP_COMPLEX_DRIFT_S1_1="ComplexDrift_StaggeredSuddenIntra"
+run_experiment "$WANDB_GROUP_COMPLEX_DRIFT_S1_1" "StaggeredIntra" \
+    "--complex_drift_scenario" "staggered_sudden_intra" \
+    "--superclass_map_path" "$SUPERCLASS_MAP_FILE" \
+    "--drift_base_epoch" "100" \
+    "--drift_stagger_interval" "10" \
+    "-go" "Drift_StaggeredIntra"
+
+# 场景 1.2: 交错突变类间超类标签漂移
+WANDB_GROUP_COMPLEX_DRIFT_S1_2="ComplexDrift_StaggeredSuddenInter"
+run_experiment "$WANDB_GROUP_COMPLEX_DRIFT_S1_2" "StaggeredInter" \
+    "--complex_drift_scenario" "staggered_sudden_inter" \
+    "--superclass_map_path" "$SUPERCLASS_MAP_FILE" \
+    "--drift_base_epoch" "100" \
+    "--drift_stagger_interval" "10" \
+    "-go" "Drift_StaggeredInter"
+
+# 场景 2.1: 局部(10%)突变类内超类标签漂移
+WANDB_GROUP_COMPLEX_DRIFT_S2_1="ComplexDrift_PartialSuddenIntra"
+run_experiment "$WANDB_GROUP_COMPLEX_DRIFT_S2_1" "PartialIntra_10pct" \
+    "--complex_drift_scenario" "partial_sudden_intra" \
+    "--superclass_map_path" "$SUPERCLASS_MAP_FILE" \
+    "--drift_base_epoch" "100" \
+    "--drift_partial_percentage" "0.1" \
+    "-go" "Drift_PartialIntra10"
+
+# 场景 2.2: 局部(10%)突变类间超类标签漂移
+WANDB_GROUP_COMPLEX_DRIFT_S2_2="ComplexDrift_PartialSuddenInter"
+run_experiment "$WANDB_GROUP_COMPLEX_DRIFT_S2_2" "PartialInter_10pct" \
+    "--complex_drift_scenario" "partial_sudden_inter" \
+    "--superclass_map_path" "$SUPERCLASS_MAP_FILE" \
+    "--drift_base_epoch" "100" \
+    "--drift_partial_percentage" "0.1" \
+    "-go" "Drift_PartialInter10"
+
+# 场景 3.1: 全局突变类内超类标签漂移
+WANDB_GROUP_COMPLEX_DRIFT_S3_1="ComplexDrift_GlobalSuddenIntra"
+run_experiment "$WANDB_GROUP_COMPLEX_DRIFT_S3_1" "GlobalIntra" \
+    "--complex_drift_scenario" "global_sudden_intra" \
+    "--superclass_map_path" "$SUPERCLASS_MAP_FILE" \
+    "--drift_base_epoch" "100" \
+    "-go" "Drift_GlobalIntra"
+
+# 场景 3.2: 全局突变类间超类标签漂移
+WANDB_GROUP_COMPLEX_DRIFT_S3_2="ComplexDrift_GlobalSuddenInter"
+run_experiment "$WANDB_GROUP_COMPLEX_DRIFT_S3_2" "GlobalInter" \
+    "--complex_drift_scenario" "global_sudden_inter" \
+    "--superclass_map_path" "$SUPERCLASS_MAP_FILE" \
+    "--drift_base_epoch" "100" \
+    "-go" "Drift_GlobalInter"
+
+echo "完成复杂概念漂移场景实验"
 echo "====================================================="
 
 # --- 运行用户提供的示例配置 (稍作调整以适应脚本) ---

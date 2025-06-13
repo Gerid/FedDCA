@@ -31,13 +31,13 @@
                 "-m",
                 "cnn",
                 "-algo",
-                "FedDCA",
+                "FedAvg",
                 "-gr",
                 "20",
                 "-ls",
                 "1",
                 "-lbs",
-                "16",
+                "128",
                 "-did",
                 "0",
                 "-go",
@@ -62,8 +62,10 @@
                 // "--save_results_to_wandb",
                 // "--simulate_drift", //Simulate data drift
                 "--use_drift_dataset",  //Use a separate drift dataset
-                "--ablation_lp_type",
-                "class_counts"
+                "--complex_drift_scenario",
+                "Interleaved_IntraSuper",
+                "--drift_base_epoch"
+                   //--complex_drift_scenario "Interleaved_IntraSuper" --drift_base_epoch 5 --drift_stagger_interval 3 --superclass_map_path "../dataset/cifar100_superclass_map.json" --output_suffix ComplexDrift_Interleaved_IntraSuper_Cifar100_FedAvg_TestExample
             ]
         },
 

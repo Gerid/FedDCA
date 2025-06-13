@@ -90,7 +90,7 @@ class FedIFCA(Server):
             if self.current_round % self.eval_gap == 0:
                 print(f"\n-------------轮次 {self.current_round}-------------")
                 print("\n评估集群模型...")
-                self.evaluate(current_round=self.current_round) # Pass current_round
+                self.evaluate(current_round=self.current_round, is_global=True) # Pass current_round
                 # self.evaluate_clusters(current_round=self.current_round) # Pass current_round to cluster specific evaluation
             
             # 客户端本地训练
@@ -103,6 +103,9 @@ class FedIFCA(Server):
             
             # 按集群聚合模型
             self.aggregate_with_clustering() # This method will now use self.current_round for logging
+            print( f"\n-------------轮次 {self.current_round}-------------")
+            print("\n评估集群模型...")
+            self.evaluate(is_globbal=False)
             
             # 统计集群分布
             if self.current_round % self.eval_gap == 0:

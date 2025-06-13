@@ -659,6 +659,19 @@ if __name__ == "__main__":
     parser.add_argument('--cluster_update_freq', type=int, default=10, help="FedDCA: Frequency (in global rounds) for updating client-cluster assignments.")
     parser.add_argument('--num_profile_samples', type=int, default=1000, help="FedDCA: Number of samples to use for constructing label/feature profiles (e.g., for GMM).")
 
+    # --- Complex Concept Drift Arguments ---
+    parser.add_argument('--complex_drift_scenario', type=str, default=None, 
+                        help='Type of complex drift scenario, e.g., "staggered_sudden_intra", "partial_sudden_inter", "global_sudden_intra".')
+    parser.add_argument('--drift_base_epoch', type=int, default=100, 
+                        help='Base epoch for complex drift to start.')
+    parser.add_argument('--drift_stagger_interval', type=int, default=10, 
+                        help='Stagger interval for staggered drift scenarios (in epochs).')
+    parser.add_argument('--drift_partial_percentage', type=float, default=0.1, 
+                        help='Percentage of data affected in partial drift scenarios (0.0 to 1.0).')
+    parser.add_argument('--superclass_map_path', type=str, default=None, 
+                        help='Path to the JSON file containing superclass mappings for complex drift.')
+    # --- End Complex Concept Drift Arguments ---
+
     # Weights & Biases arguments
     parser.add_argument('--use_wandb', action='store_true', help='Enable Weights & Biases logging')
     parser.add_argument('--wandb_project', type=str, default="FedDCA", help='Wandb project name')
@@ -686,6 +699,21 @@ if __name__ == "__main__":
     parser.add_argument('--ablation_no_reinit_clf', action='store_true', help="FedDCA-NoReinit: Do not reinitialize classifiers upon cluster changes.")
 
     args = parser.parse_args()
+
+    # --- Construct complex_drift_config from args ---
+    if args.complex_drift_scenario:
+        args.complex_drift_config = {
+            "scenario_type": args.complex_drift_scenario,
+            "base_epoch": args.drift_base_epoch,
+            "stagger_interval": args.drift_stagger_interval,
+            "partial_percentage": args.drift_partial_percentage
+        }
+    else:
+        args.complex_drift_config = None
+    # --- End Construct complex_drift_config ---
+
+    if args.device_id != "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 
     # Load YAML config
     config_path = args.config_file

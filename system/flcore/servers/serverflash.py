@@ -67,7 +67,7 @@ class Flash(Server):
             # 定期评估
             if i % self.eval_gap == 0:
                 print(f"\n--- 第 {i} 轮评估 ---")
-                self.evaluate(current_round=current_round) # Pass current_round
+                self.evaluate(current_round=current_round, is_global=True) # Pass current_round
             
             # 计算耗时
             e_t = time.time()
@@ -87,7 +87,7 @@ class Flash(Server):
         
         # 保存结果和模型
         self.save_results()
-        self.save_model(current_round=self.global_rounds) # Pass current_round for final model save
+        # self.save_model(current_round=self.global_rounds) # Pass current_round for final model save
 
     def get_client_data_size(self, clients):
         """
@@ -102,7 +102,7 @@ class Flash(Server):
     def send_parameters(self, clients):
         """向客户端发送模型参数"""
         for client in clients:
-            client.set_parameters(self.global_model)
+            client.set_parameters(self.global_model.state_dict())
 
     def aggregate_by_updates(self, clients):
         """

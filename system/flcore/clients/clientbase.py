@@ -3,13 +3,14 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
-import json
+import json # Added for loading superclass map if not already present
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import label_binarize
 from sklearn import metrics
 from utils.data_utils import read_client_data
-from utils.concept_drift_utils import drift_dataset
+# Ensure the new drift utility is imported
+from utils.concept_drift_utils import drift_dataset, load_superclass_maps, apply_complex_drift 
 
 
 class Client(object):
@@ -24,49 +25,34 @@ class Client(object):
         self.device = args.device
         self.id = id  # integer
         self.save_folder_name = args.save_folder_name
-        self.train_data = read_client_data(self.dataset, self.id, is_train=True)
-        self.test_data = read_client_data(self.dataset, self.id, is_train=False)
+        
+        # Original data loading
+        self.train_data_original = read_client_data(self.dataset, self.id, is_train=True)
+        self.test_data_original = read_client_data(self.dataset, self.id, is_train=False)
+        # Make copies that can be modified by drift
+        self.train_data = copy.deepcopy(self.train_data_original) 
+        self.test_data = copy.deepcopy(self.test_data_original)
 
-        self.global_test_id = 0
+        self.global_test_id = 0 # This seems related to a simpler drift, might need review
 
-        # 添加对概念漂移数据集的支持
-        self.current_iteration = 0
-        self.drift_data_dir = args.drift_data_dir if hasattr(args, 'drift_data_dir') else None
-        self.use_drift_dataset = args.use_drift_dataset if hasattr(args, 'use_drift_dataset') else False
-        self.max_iterations = args.max_iterations if hasattr(args, 'max_iterations') else 200
-          # 模拟漂移相关参数
-        self.simulate_drift = args.simulate_drift if hasattr(args, 'simulate_drift') else False
-        self.increment_iteration = args.increment_iteration if hasattr(args, 'increment_iteration') else True
-        self.shared_concepts = []
-        self.client_concepts = []
-        self.current_concept_id = -1
-        self.current_concept = None
-        self.drift_patterns = None
-        self.drift_schedule = None
-        self.drift_args = None
-        self.use_shared_concepts = False
-        self.gradual_window = 10
-        self.recurring_period = 30
-        self.all_concepts = None
-        self.drift_type = None
-        self.drift_points = None
-        self.drift_patterns = None
-        self.drift_schedule = None
-        self.drift_args = None
-        self.use_shared_concepts = False
-        self.gradual_window = 10
-        self.recurring_period = 30
-        self.all_concepts = None
-        self.drift_type = None
-        self.drift_points = None
+        # --- Complex Concept Drift Attributes ---
+        self.complex_drift_config = getattr(args, 'complex_drift_config', None)
+        self.superclass_map_path = getattr(args, 'superclass_map_path', None)
+        self.superclass_maps = None
+        if self.superclass_map_path and self.complex_drift_config:
+            print(f"Client {self.id}: Loading superclass map from: {self.superclass_map_path}")
+            self.superclass_maps = load_superclass_maps(self.superclass_map_path)
+            if not self.superclass_maps[0]: # Check if fine_to_coarse is empty
+                print(f"Client {self.id}: Warning - Failed to load valid superclass maps. Complex drift may not function.")
+                self.superclass_maps = None # Ensure it's None if loading failed
+        else:
+            if self.complex_drift_config:
+                print(f"Client {self.id}: Warning - Superclass map path not provided, complex drift disabled.")
+            # else: not using complex drift, so no message needed
+            pass
+        # --- End Complex Concept Drift Attributes ---
 
-        self.num_classes = args.num_classes
-        self.num_workers = args.num_workers
-        self.pin_memory = args.pin_memory
-
-        self.global_test_id = 0
-
-        # 添加对概念漂移数据集的支持
+        # 添加对概念漂移数据集的支持 (original simpler drift)
         self.current_iteration = 0
         self.drift_data_dir = args.drift_data_dir if hasattr(args, 'drift_data_dir') else None
         self.use_drift_dataset = args.use_drift_dataset if hasattr(args, 'use_drift_dataset') else False
@@ -132,6 +118,42 @@ class Client(object):
         """更新当前迭代计数器，用于概念漂移数据集"""
         if hasattr(self, 'current_iteration'):
             self.current_iteration = new_iteration
+        
+        # --- Apply Complex Drift at the start of a new iteration/round ---
+        if self.complex_drift_config and self.superclass_maps:
+            # Apply to training data
+            if hasattr(self.train_data, 'targets') and isinstance(self.train_data.targets, list):
+                # Ensure targets are modifiable (e.g. list, not tuple)
+                train_targets_list = list(self.train_data.targets)
+                drift_applied_train = apply_complex_drift(
+                    train_targets_list, 
+                    self.id, 
+                    new_iteration, # Assuming new_iteration is the current global round/epoch
+                    self.complex_drift_config, 
+                    self.superclass_maps
+                )
+                if drift_applied_train:
+                    self.train_data.targets = train_targets_list # Update with modified targets
+                    # print(f"Client {self.id}: Complex drift applied to training data at iteration {new_iteration}.")
+            # else:
+                # print(f"Client {self.id}: Warning - train_data.targets not found or not a list, cannot apply complex drift.")
+
+            # Apply to testing data
+            if hasattr(self.test_data, 'targets') and isinstance(self.test_data.targets, list):
+                test_targets_list = list(self.test_data.targets)
+                drift_applied_test = apply_complex_drift(
+                    test_targets_list, 
+                    self.id, 
+                    new_iteration, 
+                    self.complex_drift_config, 
+                    self.superclass_maps
+                )
+                if drift_applied_test:
+                    self.test_data.targets = test_targets_list
+                    # print(f"Client {self.id}: Complex drift applied to testing data at iteration {new_iteration}.")
+            # else:
+                # print(f"Client {self.id}: Warning - test_data.targets not found or not a list, cannot apply complex drift.")
+        # --- End Apply Complex Drift ---
             
     def update_concept(self, concept):
         """更新当前使用的概念"""

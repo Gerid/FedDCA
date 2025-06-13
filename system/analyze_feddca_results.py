@@ -45,6 +45,10 @@ PATTERNS_ROUND_ACC = [
     re.compile(r"Acc:\\\\s*([0-9.]+).*?round\\\\s*(\\\\d+)", re.IGNORECASE),
 ]
 
+# New pattern for complex drift filenames
+COMPLEX_DRIFT_FILENAME_PATTERN = re.compile(r"ComplexDrift_([^_]+)_([^_]+)_(.*)")
+
+
 BEST_ACC_PATTERNS = [
     # New pattern for best global accuracy if it follows a similar new format
     re.compile(r"Best Global_ Test Accuracy:\\s*([0-9.]+)", re.IGNORECASE), 
@@ -103,7 +107,22 @@ def parse_experiment_from_filename(filename_no_ext):
     param_name = "variant"
     param_value_str = run_specific_name
 
-    if experiment_group == "LP_Ablation":
+    # Check for ComplexDrift first
+    if parts[0] == "ComplexDrift":
+        experiment_group = "ComplexDrift"
+        drift_pattern = parts[1] if len(parts) > 1 else "UnknownPattern"
+        drift_type = parts[2] if len(parts) > 2 else "UnknownType"
+        
+        # The rest of the filename parts form the specific run identifier relative to the drift scenario
+        run_specific_name_parts = parts[3:]
+        run_specific_name = "_".join(run_specific_name_parts)
+        
+        param_name = "drift_scenario_details" # More specific than just 'config'
+        # This composite value will be parsed later to populate drift_pattern and drift_type columns
+        param_value_str = f"{drift_pattern}_{drift_type}"
+        # The actual run_name (e.g. Cifar100_FedAvg...) is in run_specific_name
+
+    elif experiment_group == "LP_Ablation":
         param_name = "lp_setting"
         if "FeatureBasedLP" in run_specific_name:
             param_value_str = "FeatureBasedLP"
@@ -224,22 +243,24 @@ def parse_output_file_content(filepath):
 
 
 def extract_wandb_run_id_from_log(filepath):
-    """Extracts WandB run ID from the .out log file."""
-    # Regex to find the wandb run URL and capture the run ID
+    """Extracts WandB run ID, entity, and project from the .out log file."""
+    # Regex to find the wandb run URL and capture entity, project, and run ID
     # Example: wandb: 🚀 View run at https://wandb.ai/gerid/FedDCA_Impact_Studies_Cifar100/runs/zqhaahfy
-    # It should capture 'zqhaahfy'
-    wandb_url_pattern = re.compile(r"wandb:.*?https://wandb\.ai/.+?/.+?/runs/([a-zA-Z0-9]+)")
+    # It should capture 'gerid', 'FedDCA_Impact_Studies_Cifar100', and 'zqhaahfy'
+    wandb_url_pattern = re.compile(r"wandb:.*?https://wandb\.ai/([^/]+)/([^/]+)/runs/([a-zA-Z0-9]+)")
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
                 match = wandb_url_pattern.search(line)
                 if match:
-                    run_id = match.group(1)
-                    print(f"Found WandB run ID in log {os.path.basename(filepath)}: {run_id}")
-                    return run_id
+                    entity = match.group(1)
+                    project = match.group(2)
+                    run_id = match.group(3)
+                    print(f"Found WandB info in log {os.path.basename(filepath)}: ID={run_id}, Entity={entity}, Project={project}")
+                    return run_id, entity, project
     except Exception as e:
-        print(f"Error reading log file {filepath} to find WandB run ID: {e}")
-    return None
+        print(f"Error reading log file {filepath} to find WandB run info: {e}")
+    return None, None, None
 
 
 def fetch_and_process_wandb_data(api, project, entity, run_name_or_id):
@@ -320,6 +341,7 @@ def generate_plots(all_results_df, output_dir_plots):
     os.makedirs(output_dir_plots, exist_ok=True)
     sns.set_theme(style="whitegrid")
 
+    # --- LP Ablation Plot ---
     ablation_df = all_results_df[all_results_df['experiment_group'] == 'LP_Ablation'].copy()
     if not ablation_df.empty:
         ablation_df['lp_setting'] = ablation_df['param_value'].astype(str)
@@ -342,6 +364,7 @@ def generate_plots(all_results_df, output_dir_plots):
         plt.close()
         print(f"Saved ablation study plot to {plot_path}")
 
+    # --- Sensitivity Analysis Plots ---
     sensitivity_groups = {
         'Impact_NumProfileSamples': 'num_profile_samples',
         'Impact_OTReg': 'dca_ot_reg',
@@ -396,6 +419,49 @@ def generate_plots(all_results_df, output_dir_plots):
             plt.close()
             print(f"Saved sensitivity plot to {plot_path}")
 
+    # --- Complex Drift Summary Plot ---
+    complex_drift_df = all_results_df[all_results_df['experiment_group'] == 'ComplexDrift'].copy()
+    if not complex_drift_df.empty and 'drift_pattern' in complex_drift_df.columns and 'drift_type' in complex_drift_df.columns:
+        complex_drift_df.dropna(subset=['drift_pattern', 'drift_type', 'best_accuracy'], inplace=True) # Ensure necessary columns are not NaN
+        
+        if not complex_drift_df.empty:
+            plt.figure(figsize=(12, 8)) # Adjusted size for better legend placement
+            
+            # Define a consistent order for patterns and types if desired
+            # Extract unique values and sort them to ensure consistent plotting order
+            pattern_order = sorted(complex_drift_df['drift_pattern'].unique())
+            type_order = sorted(complex_drift_df['drift_type'].unique())
+
+            sns.barplot(x='drift_pattern', y='best_accuracy', hue='drift_type', data=complex_drift_df, 
+                        palette="viridis", order=pattern_order, hue_order=type_order, dodge=True) # Added dodge
+            plt.title('Complex Drift Scenarios: Best Accuracy Comparison', fontsize=16)
+            plt.xlabel('Drift Pattern', fontsize=14)
+            plt.ylabel('Best Test Accuracy', fontsize=14)
+            plt.xticks(rotation=15, ha='right', fontsize=12)
+            plt.yticks(fontsize=12)
+            
+            # Dynamic Y-axis
+            if not complex_drift_df['best_accuracy'].empty:
+                min_val_cd = complex_drift_df['best_accuracy'].min()
+                max_val_cd = complex_drift_df['best_accuracy'].max()
+                padding_cd = (max_val_cd - min_val_cd) * 0.1 if (max_val_cd - min_val_cd) > 0 else 0.05
+                plt.ylim(max(0, min_val_cd - padding_cd * 2), min(1, max_val_cd + padding_cd)) # Adjusted padding
+            else:
+                plt.ylim(0,1)
+
+            plt.legend(title='Drift Type', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=10, title_fontsize=12)
+            plot_path = os.path.join(output_dir_plots, 'complex_drift_summary_accuracy.png')
+            plt.tight_layout(rect=[0, 0, 0.88, 1]) # Adjust rect to make space for legend
+            plt.savefig(plot_path)
+            plt.close()
+            print(f"Saved complex drift summary plot to {plot_path}")
+        else:
+            print("No data available for complex drift summary plot after filtering NaNs.")
+    else:
+        print("No 'ComplexDrift' experiments found or 'drift_pattern'/'drift_type' columns missing for summary plot.")
+
+
+    # --- Training Curves Plots ---
     training_curves_dir = os.path.join(output_dir_plots, "training_curves")
     os.makedirs(training_curves_dir, exist_ok=True)
     
@@ -474,8 +540,12 @@ def generate_tables(all_results_df, output_dir_tables):
 
     os.makedirs(output_dir_tables, exist_ok=True)
 
-    detailed_cols = ['experiment_group', 'run_name', 'param_name', 'param_value', 
-                     'best_accuracy', 'final_accuracy', 'data_source', 'filepath', 'wandb_config_summary']
+    detailed_cols = [
+        'experiment_group', 'run_name', 'param_name', 'param_value', 
+        'drift_pattern', 'drift_type', # Added
+        'best_accuracy', 'final_accuracy', 'data_source', 
+        'filepath', 'wandb_config_summary', 'complex_drift_scenario_params' # Added complex_drift_scenario_params
+    ]
     
     # Ensure all columns exist, fill with defaults if not
     for col in detailed_cols:
@@ -484,7 +554,11 @@ def generate_tables(all_results_df, output_dir_tables):
                 all_results_df[col] = 0.0
             elif col == 'wandb_config_summary':
                  all_results_df[col] = ""
-            else:
+            elif col == 'complex_drift_scenario_params':
+                 all_results_df[col] = None # Store as None if not present, will become string 'None' or empty in CSV
+            elif col in ['drift_pattern', 'drift_type']:
+                all_results_df[col] = None
+            else: # Should not happen if all_results_df is built from result_entry dicts
                 all_results_df[col] = None
     
     # Create a summary of wandb_config for the table
