@@ -181,8 +181,7 @@ class FedDCA(Server):
         self.client_cluster_assignments = {}
         self.cluster_classifiers = {}
         self.global_classifier_head = None
-        self.drift_detection_threshold = getattr(args, 'drift_detection_threshold', 0.5)
-        self.drift_threshold_wasserstein = getattr(args, 'drift_threshold_wasserstein', self.drift_detection_threshold) # Initialize here
+        self.drift_threshold_wasserstein = getattr(args, 'dca_ot_reg', 0.5) # Initialize here
         self.cluster_update_freq = getattr(args, 'cluster_update_freq', 5)
         self.max_clusters = getattr(args, 'max_clusters', 5)
         self.min_clusters_auto = getattr(args, 'min_clusters_auto', 2)
@@ -193,7 +192,7 @@ class FedDCA(Server):
         # self.reduce_drifted_influence_factor = args.reduce_drifted_influence_factor if hasattr(args, 'reduce_drifted_influence_factor') else 1.0
         
         # VWC specific attributes from user's code
-        self.vwc_reg = args.vwc_reg if hasattr(args, 'vwc_reg') else 0.1
+        self.vwc_reg = args.dca_vwc_reg if hasattr(args, 'vwc_reg') else 0.1
         # self.vwc_num_samples_dist = args.vwc_num_samples_dist if hasattr(args, 'vwc_num_samples_dist') else 500
         # self.vwc_num_samples_bary = args.vwc_num_samples_bary if hasattr(args, 'vwc_num_samples_bary') else 500
         # self.vwc_num_samples_concept = args.vwc_num_samples_concept if hasattr(args, 'vwc_num_samples_concept') else 30 

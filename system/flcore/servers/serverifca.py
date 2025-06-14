@@ -41,7 +41,7 @@ class FedIFCA(Server):
         for i in range(self.global_rounds + 1):
             self.current_round = i 
             s_t = time.time()
-            
+            self.set_slow_clients()
             self.selected_clients = self.select_clients()
               # 应用概念漂移变换（如果配置了）
             self.apply_drift_transformation()
