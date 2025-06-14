@@ -39,6 +39,9 @@ class FedALA(Server):
             #            for client in self.selected_clients]
             # [t.start() for t in threads]
             # [t.join() for t in threads]
+            if i % self.eval_gap == 0:  # Avoid evaluation at round 0 if not meaningful
+                print("\nEvaluate personalized models")
+                self.evaluate(is_global=False)
 
             self.receive_models()
             if self.dlg_eval and i%self.dlg_gap == 0:

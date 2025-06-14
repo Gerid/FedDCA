@@ -28,10 +28,10 @@ class FedAvg(Server):
             self.send_models()
             self.apply_drift_transformation()
 
-            if i%self.eval_gap == 0:
+            if self.current_round % self.args.eval_gap == 0:
                 print(f"\n-------------Round number: {i}-------------")
-                print("\nEvaluate global model")
-                self.evaluate(current_round=i) # Pass current_round
+                print("\nEvaluate global models")
+                self.evaluate(is_global=True)  # ServerBase evaluate method
 
             for client in self.selected_clients:
                 client.current_iteration = i
@@ -42,9 +42,14 @@ class FedAvg(Server):
             # [t.start() for t in threads]
             # [t.join() for t in threads]
 
-            self.receive_models()
             if self.dlg_eval and i%self.dlg_gap == 0:
                 self.call_dlg(i)
+
+            if i % self.eval_gap == 0:  # Avoid evaluation at round 0 if not meaningful
+                print("\nEvaluate personalized models")
+                self.evaluate(is_global=False)
+
+            self.receive_models()
             self.aggregate_parameters()
 
             self.Budget.append(time.time() - s_t)

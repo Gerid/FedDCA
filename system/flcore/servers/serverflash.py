@@ -53,11 +53,19 @@ class Flash(Server):
             
             # 向选定客户端发送模型
             self.send_parameters(self.selected_clients)
+            if self.current_round % self.args.eval_gap == 0:
+                print(f"\n-------------Round number: {i}-------------")
+                print("\nEvaluate global models")
+                self.evaluate(is_global=True)  # ServerBase evaluate method
+
             
             # 客户端本地训练
             for client in self.selected_clients:
                 client.train()
-            
+
+            if i % self.eval_gap == 0:  # Avoid evaluation at round 0 if not meaningful
+                print("\nEvaluate personalized models")
+                self.evaluate(is_global=False)
             # 基于客户端更新聚合
             self.aggregate_by_updates(self.selected_clients)
             

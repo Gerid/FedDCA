@@ -73,7 +73,12 @@ class FedDrift(Server):
             
             # 发送参数给客户端
             self.send_models(self.selected_clients)
-            
+
+            if self.current_round % self.args.eval_gap == 0:
+                print(f"\n-------------Round number: {i}-------------")
+                print("\nEvaluate global models")
+                self.evaluate(is_global=True)  # ServerBase evaluate method
+
             # 客户端本地训练
             for client in self.selected_clients:
                 client.train()
@@ -89,10 +94,9 @@ class FedDrift(Server):
                 client.update_prev_train_samples()
             
             # 定期评估
-            if i % self.eval_gap == 0:
-                print(f"\n--- 第 {i} 轮评估 ---")
-                self.evaluate(current_round=i) # Pass current_round
-                
+            if i % self.eval_gap == 0:  # Avoid evaluation at round 0 if not meaningful
+                print("\nEvaluate personalized models")
+                self.evaluate(is_global=False)
             
             # 计算耗时
             e_t = time.time()
