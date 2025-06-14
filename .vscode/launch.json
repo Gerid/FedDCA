@@ -31,7 +31,7 @@
                 "-m",
                 "cnn",
                 "-algo",
-                "FedRC",
+                "FedCCFA",
                 "-gr",
                 "20",
                 "-ls",

@@ -87,12 +87,12 @@ class FedIFCA(Server):
             self.send_models()
             
             # 评估当前模型
-            if self.current_round % self.eval_gap == 0:
-                print(f"\n-------------轮次 {self.current_round}-------------")
-                print("\n评估集群模型...")
-                self.evaluate(current_round=self.current_round, is_global=True) # Pass current_round
-                # self.evaluate_clusters(current_round=self.current_round) # Pass current_round to cluster specific evaluation
-            
+            if i % self.eval_gap == 0:
+                print(f"\n-------------Round number: {i}-------------")
+                print("Evaluate global model")
+                # Evaluate global model (or cluster models)
+                self.evaluate(is_global=True)
+
             # 客户端本地训练
             print("\n客户端本地训练...")
             for client in self.selected_clients:
@@ -105,7 +105,6 @@ class FedIFCA(Server):
             self.aggregate_with_clustering() # This method will now use self.current_round for logging
             print( f"\n-------------轮次 {self.current_round}-------------")
             print("\n评估集群模型...")
-            self.evaluate(is_global=False)
             
             # 统计集群分布
             if self.current_round % self.eval_gap == 0:
@@ -115,6 +114,11 @@ class FedIFCA(Server):
             if self.current_round % self.eval_gap == 0 and hasattr(self.args, 'visualize_clusters') and self.args.visualize_clusters:
                 self.visualize_clustering(self.current_round)
             
+            if i % self.eval_gap == 0:
+                print("\nEvaluate personalized models")
+                # Test on clients using their updated local models
+                self.evaluate(is_global=False)
+
             # 记录训练时间
             self.Budget.append(time.time() - s_t)
             print(f"轮次 {self.current_round} 时间消耗: {self.Budget[-1]:.2f}s")

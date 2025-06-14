@@ -92,7 +92,11 @@ class serverFedRC(Server):
             else:
                 self.aggregate_parameters() # Standard FedAvg aggregation if no clusters
 
-            self.evaluate(is_global=False)
+
+            if i % self.eval_gap == 0:
+                print("\nEvaluate personalized models")
+                # Test on clients using their updated local models
+                self.evaluate(is_global=False)
 
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
                 break

@@ -568,12 +568,17 @@ class FedCCFA(Server):
             balanced_clf_params_from_clients = {} # To store clf params after balanced_train or train_with_protos            # Apply concept drift transformation if needed
             self.apply_drift_transformation()
 
+            if i % self.eval_gap==0:
+                print(f"\\n------------- Round {i} Evaluation -------------")
+                print("\nEvaluate global models")
+                self.evaluate(self.current_round, is_global=True)
+
             for client in selected_clients:
                 client_start_time = time.time()
 
                 # 1. Client updates its label distribution
                 client.update_label_distribution()
-                self.evaluate(self.current_round, is_global=True)
+
                 # 2. Client performs balanced training (updates its classifier)
                 if self.args.balanced_epochs > 0:
                     client.balance_train() 
@@ -684,9 +689,7 @@ class FedCCFA(Server):
             # if i % self.eval_gap == 0:
 
             if i % 10 == 0:
-                print(f"\\n------------- Round {i} Evaluation -------------")
-                
-
+                print("\nEvaluate personalized models")
                 # Test on clients using their updated local models
                 self.evaluate(current_round=self.current_round, is_global=False)# Uses client.test_metrics()
 
