@@ -69,7 +69,6 @@ class Server(object):
         self.current_round = 0
 
         self.eval_interval = args.eval_interval
-        self.num_clients = args.num_clients
         self.drift_config = getattr(args, 'drift_config', None) # Ensure drift_config is initialized
 
     def set_clients(self, clientObj):
@@ -537,18 +536,4 @@ class Server(object):
             # print(f"Server: Round {self.current_round}. Complex drift scenario '{scenario}' configured, but base epoch {base_epoch} not yet reached.")
         # else:
             # print(f"Server: Round {self.current_round}. No complex drift scenario active or drift_config not set.")
-
-    def aggregate_parameters(self, selected_clients=None):
-        assert (len(self.uploaded_models) > 0)
-
-        if selected_clients is None:
-            selected_clients = self.uploaded_models  # Default to all uploaded models if none specified
-
-        self.global_model = copy.deepcopy(selected_clients[0])
-        for param in self.global_model.parameters():
-            param.data.zero_()
-            
-        for w, client_model in zip(self.uploaded_weights, selected_clients):
-            self.add_parameters(w, client_model)
-
 

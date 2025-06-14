@@ -60,7 +60,7 @@
                 "--use_drift_dataset",  //Use a separate drift dataset
                 "--drift_round",
                 "5"
-                "--complex_drift_scenario",
+                "--complex_drift",
                 "Interleaved_IntraSuper",
                 "--drift_base_epoch",
                 "5",
