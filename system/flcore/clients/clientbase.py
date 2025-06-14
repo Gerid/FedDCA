@@ -184,6 +184,10 @@ class Client(object):
                                   Can be 'feature_extractor', 'classifier', or None.
                                   If None, loads into the entire model.
         """
+        # Convert model object to state_dict if necessary
+        if isinstance(params_dict, nn.Module):
+            params_dict = params_dict.state_dict()
+
         if part == 'feature_extractor':
             target_model_part = None
             if hasattr(self.model, 'base') and self.model.base is not None:

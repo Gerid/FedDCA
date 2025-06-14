@@ -54,13 +54,23 @@ run_experiment() {
 
         # FedDCA 特有参数的默认值
         ["--num_profile_samples"]="30"
-        ["--ablation_lp_type"]="feature_based" # 'feature_based' 或 'class_counts'
-        ["--ablation_no_lp"]="PRESENCE_ONLY_FALSE" # 默认: ablation_no_lp is False
+        # ["--ablation_lp_type"]="feature_based" # 'feature_based' 或 'class_counts' # Commented out as it seems specific to an ablation not directly used in complex drift base config
+        # ["--ablation_no_lp"]="PRESENCE_ONLY_FALSE" # 默认: ablation_no_lp is False # Commented out
         ["--dca_ot_reg"]="0.1"
         ["--dca_vwc_reg"]="0.1"
         ["--dca_target_num_clusters"]="3"
+        ["--dca_vwc_K_t"]="5" # Default for VWC Kt
         ["--clustering_method"]="label_conditional"
         ["-go"]="feddca_study" # 实验目标/标签
+
+        # --- Complex Concept Drift 参数默认值 ---
+        # 这些通常会在调用 run_experiment 时被覆盖，但可以设置一个基础默认值（例如，不漂移）
+        ["--complex_drift_scenario"]="None" # 默认不使用复杂漂移
+        ["--drift_base_epoch"]="100"
+        ["--drift_stagger_interval"]="10"
+        ["--drift_partial_percentage"]="0.1"
+        ["--superclass_map_path"]="../dataset/cifar100_superclass_map.json" # 假设的默认路径
+        # --- End Complex Concept Drift 参数默认值 ---
 
         # 其他 action='store_true' 标志的默认状态 (False)
         ["--use_drift_dataset"]="PRESENCE_ONLY_FALSE"
@@ -119,99 +129,64 @@ run_experiment() {
     # sleep 1 # 短暂休眠以确保作业已注册，如果需要更精确的计数
 }
 
-# --- 消融研究: 标签概要 (LP) ---
-echo "开始消融研究: 标签概要 (LP)"
-WANDB_GROUP_LP_ABLATION="LP_Ablation"
-# 1. 基线 (基于特征的 LP) - ablation_no_lp is False
-run_experiment "$WANDB_GROUP_LP_ABLATION" "FeatureBasedLP" \
-    "--ablation_no_lp" "PRESENCE_ONLY_FALSE" \
-    "--ablation_lp_type" "feature_based" \
-    "-go" "LP_Ablation_FB"
+# --- 无漂移基线实验 ---
+echo "开始无漂移基线实验"
 
-# 2. 无标签概要 - ablation_no_lp is True
-run_experiment "$WANDB_GROUP_LP_ABLATION" "NoLP" \
-    "--ablation_no_lp" "PRESENCE_ONLY_TRUE" \
-    "-go" "LP_Ablation_NoLP"
+DATASETS_CONFIG=(
+    "fmnist cnn 200 10"
+    "Cifar10 cnn 200 10"
+    "Cifar100 cnn 200 10"
+    "har harcnn 500 6"
+)
+ALGORITHMS=("FedDCA" "FedIFCA" "FedCCFA" "FedRC" "FedDrift" "FedAvg" "Flash" "FedALA")
 
-# 3. 基于类别计数的标签概要 - ablation_no_lp is False
-run_experiment "$WANDB_GROUP_LP_ABLATION" "ClassCountLP" \
-    "--ablation_no_lp" "PRESENCE_ONLY_FALSE" \
-    "--ablation_lp_type" "class_counts" \
-    "-go" "LP_Ablation_CC"
-echo "完成消融研究: 标签概要 (LP)"
-echo "====================================================="
+# 这些基线实验的通用参数
+# 注意: -jr (join_ratio) 和 --save_..._to_wandb 标志是新添加的或需要确保存在的
+COMMON_PARAMS=(
+    "-lbs" "16"
+    "-nc" "20"
+    "-jr" "1" 
+    "--use_drift_dataset" "PRESENCE_ONLY_FALSE" # 明确无漂移数据集
+    "--complex_drift_scenario" "None"         # 明确无复杂漂移
+    "--save_global_model_to_wandb" "PRESENCE_ONLY_TRUE" # 如果启用了 wandb，则保存模型
+    "--save_results_to_wandb" "PRESENCE_ONLY_TRUE"    # 如果启用了 wandb，则保存结果
+    # -eg 10 (run_experiment 默认)
+    # -did 0 (run_experiment 默认)
+    # -ls 1 (run_experiment 默认)
+    # -lr 0.05 (run_experiment 默认)
+)
 
-# --- 参数影响研究: num_profile_samples ---
-echo "开始参数影响研究: num_profile_samples"
-WANDB_GROUP_NPS="Impact_NumProfileSamples"
-for nps_val in 10 20 30 50; do
-    run_experiment "$WANDB_GROUP_NPS" "NPS_${nps_val}" \
-        "--num_profile_samples" "$nps_val" \
-        "-go" "ImpactNPS_${nps_val}"
+for config_line in "${DATASETS_CONFIG[@]}"; do
+    read -r dataset_name model_type gr_value nb_value<<< "$config_line"
+
+    WANDB_GROUP_NO_DRIFT="NoDrift_${dataset_name}"
+
+    for algo_name in "${ALGORITHMS[@]}"; do
+        RUN_SPECIFIC_NAME="${algo_name}"
+        # 为 wandb 和输出文件名创建一个描述性的 -go 参数值
+        GO_PARAM_VALUE="NoDrift_${dataset_name}_${algo_name}"
+
+        declare -a current_run_params=()
+        current_run_params+=("-data" "$dataset_name")
+        current_run_params+=("-m" "$model_type")
+        current_run_params+=("-gr" "$gr_value")
+        current_run_params+=("-nb" "$nb_value")
+        current_run_params+=("-algo" "$algo_name")
+        current_run_params+=("${COMMON_PARAMS[@]}")
+        current_run_params+=("-go" "$GO_PARAM_VALUE") # 添加 -go 参数
+
+        # FedDCA 的特定参数 (已在 run_experiment 中默认，但显式指定也可以)
+        if [ "$algo_name" == "FedDCA" ]; then
+            current_run_params+=("--clustering_method" "label_conditional")
+        fi
+        
+        run_experiment "$WANDB_GROUP_NO_DRIFT" "$RUN_SPECIFIC_NAME" "${current_run_params[@]}"
+    done
 done
-echo "完成参数影响研究: num_profile_samples"
+
+echo "完成无漂移基线实验"
 echo "====================================================="
 
-# --- 参数影响研究: dca_ot_reg (OT 正则化) ---
-echo "开始参数影响研究: dca_ot_reg"
-WANDB_GROUP_OT_REG="Impact_OTReg"
-for ot_reg_val in 0.01 0.05 0.1 0.5; do
-    run_experiment "$WANDB_GROUP_OT_REG" "OTReg_${ot_reg_val//./p}" \
-        "--dca_ot_reg" "$ot_reg_val" \
-        "-go" "ImpactOTReg_${ot_reg_val//./p}"
-done
-echo "完成参数影响研究: dca_ot_reg"
-echo "====================================================="
-
-# --- 参数影响研究: dca_vwc_reg (VWC 正则化) ---
-echo "开始参数影响研究: dca_vwc_reg"
-WANDB_GROUP_VWC_REG="Impact_VWCReg"
-for vwc_reg_val in 0.01 0.05 0.1 0.2; do
-    run_experiment "$WANDB_GROUP_VWC_REG" "VWCReg_${vwc_reg_val//./p}" \
-        "--dca_vwc_reg" "$vwc_reg_val" \
-        "-go" "ImpactVWCReg_${vwc_reg_val//./p}"
-done
-echo "完成参数影响研究: dca_vwc_reg"
-echo "====================================================="
-
-# --- 参数影响研究: dca_target_num_clusters ---
-echo "开始参数影响研究: dca_target_num_clusters"
-WANDB_GROUP_NUM_CLUSTERS="Impact_NumClusters"
-NUM_CLIENTS_VAL=20 
-
-NUM_CLUSTERS_VALUES=(2 3 5) 
-for num_clusters_val in "${NUM_CLUSTERS_VALUES[@]}"; do 
-    if [ "$num_clusters_val" -gt "$NUM_CLIENTS_VAL" ] && [ "$NUM_CLIENTS_VAL" -gt 0 ]; then
-        echo "跳过 num_clusters=$num_clusters_val 因为它大于客户端总数 NUM_CLIENTS=$NUM_CLIENTS_VAL"
-        continue
-    fi
-    run_experiment "$WANDB_GROUP_NUM_CLUSTERS" "Clusters_${num_clusters_val}" \
-        "--dca_target_num_clusters" "$num_clusters_val" \
-        "-go" "ImpactNumClusters_${num_clusters_val}"
-done
-echo "完成参数影响研究: dca_target_num_clusters"
-echo "====================================================="
-
-# --- 运行用户提供的示例配置 (稍作调整以适应脚本) ---
-echo "运行用户示例配置"
-WANDB_GROUP_USER_EXAMPLE="UserExample_FromCmd"
-run_experiment "$WANDB_GROUP_USER_EXAMPLE" "Cifar100_DriftDataset_Cmd" \
-    "-data" "Cifar100" gg
-    "-m" "cnn" \
-    "-algo" "FedDCA" \
-    "-gr" "200" \
-    "-ls" "1" \
-    "-lbs" "128" \
-    "-lr" "0.05" \
-    "-did" "0" \
-    "-nb" "100" \
-    "-eg" "10" \
-    "-nc" "20" \
-    "--clustering_method" "label_conditional" \
-    "--use_drift_dataset" "PRESENCE_ONLY_TRUE" \
-    "-go" "cnn_drift_example" # 修改了go参数以更具描述性
-echo "完成用户示例配置"
-echo "====================================================="
 
 echo "所有研究脚本已启动。请监控 '$OUTPUT_DIR' 目录下的 .out 文件和 Wandb 仪表板 (如果启用)。"
 echo "等待所有后台作业完成..."

@@ -656,7 +656,7 @@ if __name__ == "__main__":
     parser.add_argument('--dca_ot_reg', type=float, default=0.1, help="FedDCA: Optimal transport regularization coefficient for VWC.")
     parser.add_argument('--dca_vwc_reg', type=float, default=0.1, help="FedDCA: Variational Wasserstein Clustering (VWC) regularization term for feature extractor.")
     parser.add_argument('--dca_target_num_clusters', type=int, default=None, help="FedDCA: Target number of clusters. If None, determined dynamically or by num_clusters argument.")
-    parser.add_argument('--dca_vwc_K_t', type=int, default=5, help="FedDCA: Number of VWC iterations per global round (K_t).") # New Argument
+    parser.add_argument('--dca_vwc_K_t', type=int, default=3, help="FedDCA: Number of VWC iterations per global round (K_t).") # New Argument
     parser.add_argument('--drift_detection_threshold', type=float, default=0.5, help="FedDCA: Threshold for concept drift detection based on label profiles.")
     parser.add_argument('--cluster_update_freq', type=int, default=10, help="FedDCA: Frequency (in global rounds) for updating client-cluster assignments.")
     parser.add_argument('--num_profile_samples', type=int, default=1000, help="FedDCA: Number of samples to use for constructing label/feature profiles (e.g., for GMM).")

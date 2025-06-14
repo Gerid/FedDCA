@@ -68,7 +68,6 @@ class Server(object):
 
         self.current_round = 0
 
-        self.eval_interval = args.eval_interval
         self.drift_config = getattr(args, 'drift_config', None) # Ensure drift_config is initialized
 
     def set_clients(self, clientObj):
@@ -301,16 +300,14 @@ class Server(object):
             # ids, num_samples, tot_correct, tot_auc = self.test_metrics_new_clients()
             # return ids, num_samples, tot_correct, tot_auc, [0]*len(num_samples), [0]*len(num_samples)
             # However, the current code in evaluate() calls self.test_metrics() and expects 6 values.
-            # So, if eval_new_clients is true, test_metrics_new_clients MUST be adapted or this path avoided for full metric eval.
-            print("Warning: test_metrics called with eval_new_clients=True. F1/TPR from new_clients needs specific handling if test_metrics_new_clients is not updated.")
-            # Assuming test_metrics_new_clients is updated or this path is not taken when full metrics are expected.
-            # If test_metrics_new_clients is called and returns 4 values, it will lead to an error upon return.
-            # For safety, if this branch is taken, it should conform to the 6-value return type.
-            # This is a placeholder, ideally test_metrics_new_clients should be updated.
-            # return self.test_metrics_new_clients() # This would be an error if it returns 4 values.
-            # Let's assume it's updated or this path is not critical for the current F1/TPR task.
-            # Fallback to standard client evaluation if new client specific evaluation is not fully integrated with new metrics.
-            pass # Allow flow to standard client evaluation for now.
+            # A simple fix: wrap the call and ensure 6 values are returned, possibly logging a warning if 4 values are detected.
+            # Let's proceed with caution and ensure the system is robust to such changes.
+            stats_new_clients = self.test_metrics_new_clients()
+            if len(stats_new_clients) == 4:
+                print("Warning: Detected 4 values from test_metrics_new_clients, expected 6. Padding with zeros for F1 and TPR.")
+                return (*stats_new_clients, [0]*len(stats_new_clients[1]), [0]*len(stats_new_clients[1]))
+            else:
+                return stats_new_clients
 
         num_samples = []
         tot_correct = []
@@ -513,27 +510,29 @@ class Server(object):
         return ids, num_samples, tot_correct, tot_auc
 
     def apply_drift_transformation(self):
-        # This method is called by server implementations (like FedAvg, FedIFCA)
-        # The actual data transformation happens on the client side.
-        # This server method can log or coordinate based on self.drift_config.
-        if self.drift_config and self.drift_config.get("complex_drift_scenario"):
-            scenario = self.drift_config.get("complex_drift_scenario")
-            base_epoch = self.drift_config.get("drift_base_epoch", 0)
+        """
+        应用于客户端的概念漂移转换。
+        此方法应在每个全局轮次开始时调用，在客户端选择和训练之前。
+        它会调用每个客户端的 update_iteration 方法，从而触发客户端基于其
+        complex_drift_config 和 superclass_maps 应用复杂概念漂移。
+        """
+        # 检查是否在 main.py 中配置了复杂漂移
+        if hasattr(self.args, 'complex_drift_config') and self.args.complex_drift_config:
+            # complex_drift_config 是一个字典，包含了漂移场景、基础轮次等信息
+            # 这个配置在客户端初始化时已经传递给了每个客户端
             
-            # Log that a complex drift scenario is active if current round is at or after base_epoch
-            if self.current_round >= base_epoch:
-                print(f"Server: Round {self.current_round}. Complex drift scenario '{scenario}' is active (base epoch {base_epoch}).")
-                if hasattr(self, 'selected_clients') and self.selected_clients:
-                    for client in self.selected_clients:
-                        # Further logic could determine if drift *specifically* applies to this client in this round
-                        # (e.g., for staggered or partial drift).
-                        # The client itself will make the final determination based on its ID and the full drift_config.
-                        # This server log indicates the server is aware the client *might* be drifting.
-                        print(f"Server: Instructing/expecting client {client.id} to consider drift at round {self.current_round} for scenario '{scenario}'.")
+            if not self.clients:
+                print(f"Server (Round {self.current_round}): No clients available to apply drift transformation.")
+                return
+
+            print(f"Server (Round {self.current_round}): Notifying all {len(self.clients)} clients to update iteration for potential complex drift application.")
+            for client in self.clients:
+                if hasattr(client, 'update_iteration'):
+                    # client.update_iteration 会检查是否满足漂移条件并调用 apply_complex_drift
+                    client.update_iteration(self.current_round) 
                 else:
-                    print(f"Server: Round {self.current_round}. Complex drift scenario '{scenario}' active, but no clients selected or 'selected_clients' not available at this logging point.")
-            # else:
-            # print(f"Server: Round {self.current_round}. Complex drift scenario '{scenario}' configured, but base epoch {base_epoch} not yet reached.")
+                    print(f"Server (Round {self.current_round}): Warning - Client {client.id} does not have update_iteration method.")
         # else:
-            # print(f"Server: Round {self.current_round}. No complex drift scenario active or drift_config not set.")
+            # 如果没有配置 complex_drift_config，则不执行任何操作
+            # print(f"Server (Round {self.current_round}): Complex drift not configured. Skipping drift transformation.")
 

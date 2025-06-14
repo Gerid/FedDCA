@@ -573,7 +573,7 @@ class FedCCFA(Server):
 
                 # 1. Client updates its label distribution
                 client.update_label_distribution()
-
+                self.evaluate(self.current_round, is_global=True)
                 # 2. Client performs balanced training (updates its classifier)
                 if self.args.balanced_epochs > 0:
                     client.balance_train() 
@@ -688,7 +688,7 @@ class FedCCFA(Server):
                 
 
                 # Test on clients using their updated local models
-                self.evaluate(current_round=self.current_round)# Uses client.test_metrics()
+                self.evaluate(current_round=self.current_round, is_global=False)# Uses client.test_metrics()
 
                 # Optionally, test global model on a global test set if available
             

@@ -71,7 +71,7 @@ class serverFedRC(Server):
             if i % self.eval_gap == 0:
                 print(f"\n-------------Round number: {i}-------------")
                 print("Evaluate global model")
-                self.evaluate() # Evaluate global model (or cluster models)
+                self.evaluate(is_global=True) # Evaluate global model (or cluster models)
 
             self.apply_drift_transformation()
 
@@ -91,6 +91,8 @@ class serverFedRC(Server):
                 self.aggregate_cluster_parameters() # Aggregate models per cluster
             else:
                 self.aggregate_parameters() # Standard FedAvg aggregation if no clusters
+
+            self.evaluate(is_global=False)
 
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
                 break
@@ -305,85 +307,85 @@ class serverFedRC(Server):
         if not is_initialization:
             print("Cluster models recomputed.")
 
-    def evaluate(self, acc=None, loss=None): # Overriding to potentially evaluate per cluster
-        if self.num_clusters > 0:
-            # Evaluate each cluster model on the test data of clients in that cluster
-            # Or evaluate all cluster models on all test data (less common for personalization)
-            # For simplicity, let's report average performance of cluster models on their respective clients
+    # def evaluate(self, acc=None, loss=None): # Overriding to potentially evaluate per cluster
+    #     if self.num_clusters > 0:
+    #         # Evaluate each cluster model on the test data of clients in that cluster
+    #         # Or evaluate all cluster models on all test data (less common for personalization)
+    #         # For simplicity, let's report average performance of cluster models on their respective clients
             
-            all_stats_collector = {'num_samples': [], 'tot_correct': [], 'tot_auc': []}
-            all_stats_train_collector = {'num_samples': [], 'losses': []}
+    #         all_stats_collector = {'num_samples': [], 'tot_correct': [], 'tot_auc': []}
+    #         all_stats_train_collector = {'num_samples': [], 'losses': []}
 
-            for cid in range(self.num_clusters):
-                cluster_clients = [client for client in self.clients if self.client_cluster_assignments[client.id] == cid]
-                if not cluster_clients:
-                    continue
+    #         for cid in range(self.num_clusters):
+    #             cluster_clients = [client for client in self.clients if self.client_cluster_assignments[client.id] == cid]
+    #             if not cluster_clients:
+    #                 continue
 
-                # Temporarily set the global_model to the current cluster_model for evaluation
-                # This is a bit of a hack; ideally, client.test_metrics() would take a model
-                original_global_model_state = copy.deepcopy(self.global_model.state_dict())
-                self.global_model.load_state_dict(self.cluster_models[cid].state_dict())
+    #             # Temporarily set the global_model to the current cluster_model for evaluation
+    #             # This is a bit of a hack; ideally, client.test_metrics() would take a model
+    #             original_global_model_state = copy.deepcopy(self.global_model.state_dict())
+    #             self.global_model.load_state_dict(self.cluster_models[cid].state_dict())
                 
-                num_samples_cluster, tot_correct_cluster, tot_auc_cluster = [], [], []
-                num_samples_train_cluster, losses_train_cluster = [], []
+    #             num_samples_cluster, tot_correct_cluster, tot_auc_cluster = [], [], []
+    #             num_samples_train_cluster, losses_train_cluster = [], []
 
-                for client in cluster_clients:
-                    # Ensure client uses the correct (cluster) model for its test_metrics
-                    client.set_parameters(self.cluster_models[cid]) # Important!
-                    ct, ns, auc_val = client.test_metrics()
-                    tot_correct_cluster.append(ct * 1.0)
-                    tot_auc_cluster.append(auc_val * ns)
-                    num_samples_cluster.append(ns)
+    #             for client in cluster_clients:
+    #                 # Ensure client uses the correct (cluster) model for its test_metrics
+    #                 client.set_parameters(self.cluster_models[cid].state_dict()) # Important!
+    #                 ct, ns, auc_val = client.test_metrics()
+    #                 tot_correct_cluster.append(ct * 1.0)
+    #                 tot_auc_cluster.append(auc_val * ns)
+    #                 num_samples_cluster.append(ns)
 
-                    cl, ns_train = client.train_metrics() # client.train_metrics uses client.model
-                    losses_train_cluster.append(cl * 1.0)
-                    num_samples_train_cluster.append(ns_train)
+    #                 cl, ns_train = client.train_metrics() # client.train_metrics uses client.model
+    #                 losses_train_cluster.append(cl * 1.0)
+    #                 num_samples_train_cluster.append(ns_train)
 
-                all_stats_collector['num_samples'].extend(num_samples_cluster)
-                all_stats_collector['tot_correct'].extend(tot_correct_cluster)
-                all_stats_collector['tot_auc'].extend(tot_auc_cluster)
-                all_stats_train_collector['num_samples'].extend(num_samples_train_cluster)
-                all_stats_train_collector['losses'].extend(losses_train_cluster)
+    #             all_stats_collector['num_samples'].extend(num_samples_cluster)
+    #             all_stats_collector['tot_correct'].extend(tot_correct_cluster)
+    #             all_stats_collector['tot_auc'].extend(tot_auc_cluster)
+    #             all_stats_train_collector['num_samples'].extend(num_samples_train_cluster)
+    #             all_stats_train_collector['losses'].extend(losses_train_cluster)
                 
-                # Restore global model state if it was changed
-                self.global_model.load_state_dict(original_global_model_state)
+    #             # Restore global model state if it was changed
+    #             self.global_model.load_state_dict(original_global_model_state)
 
-                # Log per-cluster metrics if desired
-                # test_acc_c = sum(tot_correct_cluster) / sum(num_samples_cluster) if sum(num_samples_cluster) > 0 else 0
-                # print(f"Cluster {cid} Test Accuracy: {test_acc_c:.4f}")
+    #             # Log per-cluster metrics if desired
+    #             # test_acc_c = sum(tot_correct_cluster) / sum(num_samples_cluster) if sum(num_samples_cluster) > 0 else 0
+    #             # print(f"Cluster {cid} Test Accuracy: {test_acc_c:.4f}")
 
-            # Calculate overall federated metrics from collected stats
-            test_acc_overall = sum(all_stats_collector['tot_correct']) / sum(all_stats_collector['num_samples']) if sum(all_stats_collector['num_samples']) > 0 else 0
-            test_auc_overall = sum(all_stats_collector['tot_auc']) / sum(all_stats_collector['num_samples']) if sum(all_stats_collector['num_samples']) > 0 else 0
-            train_loss_overall = sum(all_stats_train_collector['losses']) / sum(all_stats_train_collector['num_samples']) if sum(all_stats_train_collector['num_samples']) > 0 else 0
+    #         # Calculate overall federated metrics from collected stats
+    #         test_acc_overall = sum(all_stats_collector['tot_correct']) / sum(all_stats_collector['num_samples']) if sum(all_stats_collector['num_samples']) > 0 else 0
+    #         test_auc_overall = sum(all_stats_collector['tot_auc']) / sum(all_stats_collector['num_samples']) if sum(all_stats_collector['num_samples']) > 0 else 0
+    #         train_loss_overall = sum(all_stats_train_collector['losses']) / sum(all_stats_train_collector['num_samples']) if sum(all_stats_train_collector['num_samples']) > 0 else 0
             
-            # std_test_acc = np.std([c/n if n>0 else 0 for c,n in zip(all_stats_collector['tot_correct'], all_stats_collector['num_samples'])])
-            # std_test_auc = np.std([a/n if n>0 else 0 for a,n in zip(all_stats_collector['tot_auc'], all_stats_collector['num_samples'])])
+    #         # std_test_acc = np.std([c/n if n>0 else 0 for c,n in zip(all_stats_collector['tot_correct'], all_stats_collector['num_samples'])])
+    #         # std_test_auc = np.std([a/n if n>0 else 0 for a,n in zip(all_stats_collector['tot_auc'], all_stats_collector['num_samples'])])
 
 
-            if acc is None: self.rs_test_acc.append(test_acc_overall)
-            else: acc.append(test_acc_overall)
-            if loss is None: self.rs_train_loss.append(train_loss_overall)
-            else: loss.append(train_loss_overall)
-            # self.rs_test_auc can be appended similarly if needed for overall AUC
+    #         if acc is None: self.rs_test_acc.append(test_acc_overall)
+    #         else: acc.append(test_acc_overall)
+    #         if loss is None: self.rs_train_loss.append(train_loss_overall)
+    #         else: loss.append(train_loss_overall)
+    #         # self.rs_test_auc can be appended similarly if needed for overall AUC
 
-            print(f"Averaged Train Loss (across clusters): {train_loss_overall:.4f}")
-            print(f"Averaged Test Accuracy (across clusters): {test_acc_overall:.4f}")
-            print(f"Averaged Test AUC (across clusters): {test_auc_overall:.4f}")
-            # print(f"Std Test Accuracy (across clusters): {std_test_acc:.4f}")
-            # print(f"Std Test AUC (across clusters): {std_test_auc:.4f}")
+    #         print(f"Averaged Train Loss (across clusters): {train_loss_overall:.4f}")
+    #         print(f"Averaged Test Accuracy (across clusters): {test_acc_overall:.4f}")
+    #         print(f"Averaged Test AUC (across clusters): {test_auc_overall:.4f}")
+    #         # print(f"Std Test Accuracy (across clusters): {std_test_acc:.4f}")
+    #         # print(f"Std Test AUC (across clusters): {std_test_auc:.4f}")
 
-            if self.args.use_wandb and wandb.run is not None:
-                 wandb.log({
-                    "Global Train Loss": train_loss_overall,
-                    "Global Test Accuracy": test_acc_overall,
-                    "Global Test AUC": test_auc_overall,
-                    # "Std Test Accuracy": std_test_acc,
-                    # "Std Test AUC": std_test_auc
-                }, step=self.current_round)
+    #         if self.args.use_wandb and wandb.run is not None:
+    #              wandb.log({
+    #                 "Global Train Loss": train_loss_overall,
+    #                 "Global Test Accuracy": test_acc_overall,
+    #                 "Global Test AUC": test_auc_overall,
+    #                 # "Std Test Accuracy": std_test_acc,
+    #                 # "Std Test AUC": std_test_auc
+    #             }, step=self.current_round)
 
-        else: # No clustering, fall back to base server evaluation
-            super().evaluate(acc=acc, loss=loss, current_round=self.current_round)
+    #     else: # No clustering, fall back to base server evaluation
+    #         super().evaluate(acc=acc, loss=loss, current_round=self.current_round)
 
     # Need to ensure that the main.py can pass 'num_clusters' and 'cluster_update_frequency'
     # and 'fedrc_lambda' from args to the server.
