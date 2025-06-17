@@ -69,14 +69,6 @@ class Flash(Server):
             # 基于客户端更新聚合
             self.aggregate_by_updates(self.selected_clients)
             
-            # 再次向选定客户端发送更新后的模型
-            self.send_parameters(self.selected_clients)
-            
-            # 定期评估
-            if i % self.eval_gap == 0:
-                print(f"\n--- 第 {i} 轮评估 ---")
-                self.evaluate(current_round=current_round, is_global=True) # Pass current_round
-            
             # 计算耗时
             e_t = time.time()
             self.Budget.append(e_t - s_t)

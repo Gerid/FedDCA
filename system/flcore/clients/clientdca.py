@@ -25,20 +25,8 @@ class clientDCA(Client):
 
         # 添加迭代跟踪相关属性
         self.current_iteration = 0
-        self.drift_data_dir = args.drift_data_dir if hasattr(args, 'drift_data_dir') else None
         self.use_drift_dataset = args.use_drift_dataset if hasattr(args, 'use_drift_dataset') else False
-        self.max_iterations = args.max_iterations if hasattr(args, 'max_iterations') else 200
         
-        # 添加标准数据集上的模拟漂移控制参数
-        self.simulate_drift = args.simulate_drift if hasattr(args, 'simulate_drift') else True
-        self.increment_iteration = args.increment_iteration if hasattr(args, 'increment_iteration') else True
-        self.drift_patterns = None
-        self.drift_schedule = None
-        
-        # GMM related parameters (may become less relevant with new profile generation)
-        self.gmm_n_components = args.gmm_n_components if hasattr(args, 'gmm_n_components') else 1
-        # Ensure gmm_min_samples_for_fitting is at least 1, even if gmm_n_components is 0 or 1
-        self.gmm_min_samples_for_fitting = max(1, args.gmm_min_samples_for_fitting if hasattr(args, 'gmm_min_samples_for_fitting') else self.gmm_n_components * 5)
 
         # Parameters for new label profile generation
         self.num_profile_samples = getattr(args, 'num_profile_samples', 30)
@@ -68,24 +56,24 @@ class clientDCA(Client):
                 self.model.parameters(), 
                 lr=self.learning_rate
             )
-            self.optimizer_g = torch.optim.SGD(
-                self.global_model.parameters(),
-                lr=self.learning_rate
-            )
+            # self.optimizer_g = torch.optim.SGD(
+            #     self.global_model.parameters(),
+            #     lr=self.learning_rate
+            # )
             
-            self.learning_rate_scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
-                optimizer=self.optimizer_g, 
-                gamma=self.learning_rate_decay_gamma
-            )
+            # self.learning_rate_scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
+            #     optimizer=self.optimizer_g, 
+            #     gamma=self.learning_rate_decay_gamma
+            # )
 
             self.catch_intermediate_output = True
             self.intermediate_output = None
             self.intermediate_outputs = []
             self.drift_interval = 20
             self.drift_args = None
-            self.KL = nn.KLDivLoss()
+            # self.KL = nn.KLDivLoss()
             self.previous_loss = None
-            self.drift_threshold = 0.1
+            # self.drift_threshold = 0.1
             self.drift_detection_enabled = True
             
             self.clf_keys = []  # Will be set by the server if needed, or can be derived if model structure is fixed
@@ -349,27 +337,21 @@ class clientDCA(Client):
                     pass
                 self.hook_handle = None
         
-    def detect_drift(self, new_loss):
-        """检测是否发生概念漂移"""
-        if self.previous_loss is None:
-            self.previous_loss = new_loss
-            return False
+    # 转到server端实现
+    # def detect_drift(self, new_loss):
+    #     """检测是否发生概念漂移"""
+    #     if self.previous_loss is None:
+    #         self.previous_loss = new_loss
+    #         return False
             
-        try:
-            drift_coefficient = max(
-                (new_loss - self.previous_loss) / self.previous_loss, 
-                0
-            )
-            self.previous_loss = new_loss
-            return drift_coefficient > self.drift_threshold
-        except (ZeroDivisionError, ValueError) as e:
-            print(f"Error detecting drift for client {self.id}: {str(e)}")
-            return False    
+    #     try:
+    #         drift_coefficient = max(
+    #             (new_loss - self.previous_loss) / self.previous_loss, 
+    #             0
+    #         )
+    #         self.previous_loss = new_loss
+    #         return drift_coefficient > self.drift_threshold
+    #     except (ZeroDivisionError, ValueError) as e:
+    #         print(f"Error detecting drift for client {self.id}: {str(e)}")
+    #         return False    
 
-    def reset_state(self):
-        """在概念漂移点重置客户端状态"""
-        # 重置损失跟踪
-        self.previous_loss = None
-        
-        # 可以根据需要添加其他重置逻辑
-        # 例如重置优化器状态等

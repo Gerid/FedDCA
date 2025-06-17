@@ -23,6 +23,9 @@ class Server(object):
         self.batch_size = args.batch_size
         self.learning_rate = args.local_learning_rate
         self.global_model = copy.deepcopy(args.model)
+
+
+
         self.num_clients = args.num_clients
         self.join_ratio = args.join_ratio
         self.random_join_ratio = args.random_join_ratio
@@ -65,7 +68,58 @@ class Server(object):
         self.new_clients = []
         self.eval_new_clients = False
         self.fine_tuning_epoch = args.fine_tuning_epoch
+        # --- Load initial global model if enabled ---
+        if hasattr(args, 'enable_initial_model_loading') and \
+                args.enable_initial_model_loading:
+            if not hasattr(args, 'initial_model_path') or not args.initial_model_path:
+                model_path = os.path.join("models", self.dataset)
+                model_filename = self.algorithm + "_server" + ".pt"
+                model_filepath = os.path.join(model_path, model_filename)
+                args.initial_model_path = model_filepath
 
+            if os.path.exists(args.initial_model_path):
+                try:
+                    print(
+                        f"Attempting to load initial global model for dataset {self.dataset} from: {args.initial_model_path}")
+
+                    # Load checkpoint, ensuring it's mapped to the correct device
+                    # self.global_model is already on self.device because args.model is.
+                    checkpoint = torch.load(
+                        args.initial_model_path, map_location=self.device, weights_only=False)
+
+                    model_state_dict = None
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        model_state_dict = checkpoint['model_state_dict']
+                    # another common pattern for saving models
+                    elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                        model_state_dict = checkpoint['state_dict']
+                    elif isinstance(checkpoint, dict):
+                        # Heuristic: if it's a dict and doesn't contain common metadata keys, assume it's a raw state_dict
+                        common_metadata_keys = {'optimizer_state_dict', 'optimizer',
+                                                'epoch', 'scheduler_state_dict', 'scheduler', 'args', 'best_acc'}
+                        if not any(key in common_metadata_keys for key in checkpoint.keys()):
+                            model_state_dict = checkpoint
+                    # if it's a full model object (less common for .pt/.pth files meant for transfer)
+                    elif hasattr(checkpoint, 'state_dict'):
+                        model_state_dict = checkpoint.state_dict()
+
+                    if model_state_dict:
+                        self.global_model.load_state_dict(model_state_dict)
+                        print(
+                            f"Successfully loaded initial global model from {args.initial_model_path}")
+                    else:
+                        print(f"Warning: Could not extract model state_dict from checkpoint at {args.initial_model_path}. "
+                              "The checkpoint should be a PyTorch state_dict, or a dictionary containing the key 'model_state_dict' or 'state_dict'.")
+                        print("Proceeding with randomly initialized global model.")
+
+                except Exception as e:
+                    print(
+                        f"Error loading initial global model from {args.initial_model_path}: {e}")
+                    print("Proceeding with randomly initialized global model.")
+            else:
+                print(
+                    f"Warning: Initial model path not found: {args.initial_model_path}. Proceeding with randomly initialized global model.")
+        # --- End Load initial global model ---
         self.current_round = 0
 
         self.drift_config = getattr(args, 'drift_config', None) # Ensure drift_config is initialized
@@ -514,11 +568,11 @@ class Server(object):
         应用于客户端的概念漂移转换。
         此方法应在每个全局轮次开始时调用，在客户端选择和训练之前。
         它会调用每个客户端的 update_iteration 方法，从而触发客户端基于其
-        complex_drift_config 和 superclass_maps 应用复杂概念漂移。
+        drift_config 和 superclass_maps 应用复杂概念漂移。
         """
         # 检查是否在 main.py 中配置了复杂漂移
-        if hasattr(self.args, 'complex_drift_config') and self.args.complex_drift_config:
-            # complex_drift_config 是一个字典，包含了漂移场景、基础轮次等信息
+        if hasattr(self.args, 'drift_config') and self.args.drift_config:
+            # drift_config 是一个字典，包含了漂移场景、基础轮次等信息
             # 这个配置在客户端初始化时已经传递给了每个客户端
             
             if not self.clients:

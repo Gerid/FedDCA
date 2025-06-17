@@ -4,7 +4,8 @@ import time
 import numpy as np
 import os
 from flcore.servers.serverbase import Server
-from flcore.clients.clientfedccfa import clientFedCCFA # Ensure this client is compatible
+from flcore.clients.clientfedccfa import clientFedCCFA
+from utils.visualization_utils import visualize_clustering_results # Added import
 from threading import Thread
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 # import matplotlib.pyplot as plt # Not used
@@ -35,6 +36,14 @@ class FedCCFA(Server):
         
         self.Budget = [] # Kept from original
         self.client_data_size = {}  # For weighted aggregation
+
+        # Visualization attributes
+        self.client_cluster_assignments = {} # To store client_id -> cluster_id_for_label_0 (or dominant cluster)
+        self.client_cluster_assignments_history = {} # For heatmap: {client_id: {round: cluster_id}}
+        self.if_visualize_clustering_results = getattr(args, 'visualize_clusters', False)
+        self.cluster_visualization_type = getattr(args, 'cluster_visualization_type', 'voronoi') 
+        self.cluster_tsne_feature_source = getattr(args, 'cluster_tsne_feature_source', 'model_embeddings') # Default to model embeddings for FedCCFA
+        self.client_label_profiles = {} # Needed for LP-based t-SNE if selected
 
         # Ensure essential args are present (defaults from reference FedCCFA.yaml if not)
         if not hasattr(args, 'eps'):
@@ -725,3 +734,89 @@ class FedCCFA(Server):
         """Sets the classifier keys for the server."""
         self.clf_keys = clf_keys
         print(f"Server clf_keys set to: {self.clf_keys}")
+
+    def _trigger_visualization(self):
+        print("Preparing for FedCCFA clustering visualization...")
+        client_feature_embeddings_for_tsne = None
+        # FedCCFA might not have explicit label profiles like FedDCA unless clients generate them.
+        # If cluster_tsne_feature_source is 'lp', ensure client_label_profiles is populated.
+        # For FedCCFA, 'model_embeddings' is a more natural fit if LPs are not standard.
+
+        if self.cluster_tsne_feature_source == 'model_embeddings':
+            temp_client_feature_embeddings = {}
+            # Use self.clients (all clients) or self.selected_clients for embeddings
+            clients_for_embedding = self.clients # Or self.selected_clients based on what's desired
+            for client_obj in clients_for_embedding:
+                if client_obj.id in self.client_cluster_assignments: # Only for clients with assignments
+                    if hasattr(client_obj, 'test_loader') and client_obj.test_loader and len(client_obj.test_loader) > 0:
+                        try:
+                            data_iterator = iter(client_obj.test_loader)
+                            sample_data, _ = next(data_iterator)
+                            sample_data = sample_data.to(self.device)
+                            
+                            # Get the representation part of the client's model
+                            client_model_rep_params = []
+                            if hasattr(client_obj.model, 'named_parameters') and self.clf_keys:
+                                client_model_fe_module = torch.nn.Sequential(*[copy.deepcopy(module) for name, module in client_obj.model.named_modules() if name not in self.clf_keys and name != "" and not list(module.children())])
+                            else: # Fallback to whole model if no clf_keys or simple structure
+                                client_model_fe_module = copy.deepcopy(client_obj.model)
+                                if hasattr(client_model_fe_module, 'head'): # Try to remove head if exists
+                                    client_model_fe_module.head = torch.nn.Identity()
+                                elif hasattr(client_model_fe_module, self.clf_keys[0].split('.')[0] if self.clf_keys else 'fc'): # common classifier names
+                                    setattr(client_model_fe_module, self.clf_keys[0].split('.')[0] if self.clf_keys else 'fc', torch.nn.Identity())
+
+                            if client_model_fe_module:
+                                client_model_fe_module.eval()
+                                with torch.no_grad():
+                                    embedding = client_model_fe_module(sample_data)
+                                    if embedding.ndim > 2: embedding = embedding.view(embedding.size(0), -1)
+                                    embedding = embedding.mean(dim=0).cpu().numpy()
+                                temp_client_feature_embeddings[client_obj.id] = embedding
+                        except Exception as e:
+                            # print(f"Debug (FedCCFA): Error getting embedding for client {client_obj.id}: {e}")
+                            pass 
+            if temp_client_feature_embeddings:
+                client_feature_embeddings_for_tsne = temp_client_feature_embeddings
+
+        elif self.cluster_tsne_feature_source == 'lp':
+            # Ensure client_label_profiles is populated if this source is used.
+            # FedCCFA clients might not generate these by default. This is a placeholder.
+            # If you adapt FedCCFA clients to produce label profiles, they would be stored in self.client_label_profiles.
+            if not self.client_label_profiles or not any(self.client_label_profiles.values()):
+                print("FedCCFA Visualization: Label profiles selected for t-SNE, but no profiles available. Skipping t-SNE plot.")
+            # client_label_profiles should be structured like: {client_id: {label: (samples_array, losses_array)}}
+            # The visualization utility expects this structure.
+            pass # Visualization utility will handle it if self.client_label_profiles is correctly populated
+
+
+        output_visualization_dir = os.path.join(self.args.output_dir, "clustering_visualizations_fedccfa")
+        
+        # Determine num_clusters for visualization
+        # FedCCFA clusters per label. For a general visualization, this is an approximation.
+        # We use the number of unique dominant cluster IDs assigned.
+        num_active_clusters = len(set(v for v in self.client_cluster_assignments.values() if v is not None))
+        num_clusters_to_pass = num_active_clusters if num_active_clusters > 0 else 1 # Default to 1 if no clusters
+        if self.args.oracle: # If oracle, num_clusters might be more complex
+            # Example: Max number of groups across all labels from oracle_merging
+            if hasattr(self, 'merged_clf_groups') and self.merged_clf_groups:
+                max_groups = 0
+                for label_idx, groups in self.merged_clf_groups.items():
+                    if len(groups) > max_groups:
+                        max_groups = len(groups)
+                if max_groups > 0: num_clusters_to_pass = max_groups
+
+        visualize_clustering_results(
+            client_cluster_assignments=self.client_cluster_assignments,
+            client_label_profiles=self.client_label_profiles if self.cluster_tsne_feature_source == 'lp' and not self.ablation_no_lp else None,
+            client_feature_embeddings=client_feature_embeddings_for_tsne,
+            client_cluster_assignments_history=self.client_cluster_assignments_history,
+            current_round=self.current_round,
+            output_dir=output_visualization_dir,
+            num_clients=self.num_clients,
+            num_clusters=num_clusters_to_pass, # This is an approximation for FedCCFA
+            cluster_visualization_type=self.cluster_visualization_type,
+            cluster_tsne_feature_source=self.cluster_tsne_feature_source,
+            ablation_no_lp=getattr(self.args, 'ablation_no_lp', False), # Pass ablation_no_lp if relevant
+            args_dataset=self.args.dataset
+        )
+        print(f"FedCCFA clustering visualization attempted for round {self.current_round}.")

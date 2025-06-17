@@ -4,6 +4,7 @@ import torch.nn as nn
 import numpy as np
 import os
 import json # Added for loading superclass map if not already present
+import random # Added for choosing fixed concept mapping
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import label_binarize
@@ -26,30 +27,40 @@ class Client(object):
         self.id = id  # integer
         self.save_folder_name = args.save_folder_name
         
-        # Original data loading
         self.train_data_original = read_client_data(self.dataset, self.id, is_train=True)
         self.test_data_original = read_client_data(self.dataset, self.id, is_train=False)
-        # Make copies that can be modified by drift
         self.train_data = copy.deepcopy(self.train_data_original) 
         self.test_data = copy.deepcopy(self.test_data_original)
 
-        self.global_test_id = 0 # This seems related to a simpler drift, might need review
+        self.global_test_id = 0
 
         # --- Complex Concept Drift Attributes ---
-        self.complex_drift_config = getattr(args, 'complex_drift_config', None)
+        self.complex_drift_config = getattr(args, 'drift_config', None)
         self.superclass_map_path = getattr(args, 'superclass_map_path', None)
         self.superclass_maps = None
+
+        self.fixed_concept_mappings = getattr(args, 'fixed_concept_mappings', None) # --- Fixed Concept Mappings Attributes ---
+        self.client_chosen_concept_index = None
+        if self.fixed_concept_mappings and len(self.fixed_concept_mappings) > 0: # Check if list is not empty
+            # Each client randomly chooses one of the K fixed concept patterns for the entire experiment duration
+            self.client_chosen_concept_index = random.randrange(len(self.fixed_concept_mappings))
+            print(f"Client {self.id}: Will use fixed concept mapping index {self.client_chosen_concept_index}.") # --- End Fixed Concept Mappings Attributes ---
+
         if self.superclass_map_path and self.complex_drift_config:
-            print(f"Client {self.id}: Loading superclass map from: {self.superclass_map_path}")
-            self.superclass_maps = load_superclass_maps(self.superclass_map_path)
-            if not self.superclass_maps[0]: # Check if fine_to_coarse is empty
-                print(f"Client {self.id}: Warning - Failed to load valid superclass maps. Complex drift may not function.")
-                self.superclass_maps = None # Ensure it's None if loading failed
-        else:
-            if self.complex_drift_config:
-                print(f"Client {self.id}: Warning - Superclass map path not provided, complex drift disabled.")
-            # else: not using complex drift, so no message needed
-            pass
+            # Resolve path if relative, similar to main.py
+            resolved_path = self.superclass_map_path
+            if not os.path.isabs(resolved_path):
+                script_dir = os.path.dirname(os.path.realpath(__file__))
+                project_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..")) 
+                resolved_path = os.path.join(project_root, self.superclass_map_path)
+            
+            print(f"Client {self.id}: Loading superclass map from: {resolved_path}")
+            self.superclass_maps = load_superclass_maps(resolved_path)
+            if not self.superclass_maps or not self.superclass_maps[0]: 
+                print(f"Client {self.id}: Warning - Failed to load valid superclass maps from {resolved_path}. Complex drift may not function as expected.")
+                self.superclass_maps = None 
+        elif self.complex_drift_config:
+            print(f"Client {self.id}: Warning - Superclass map path not provided, or complex_drift_config missing. Complex drift features needing it might be limited.")
         # --- End Complex Concept Drift Attributes ---
 
         # 添加对概念漂移数据集的支持 (original simpler drift)
@@ -62,7 +73,7 @@ class Client(object):
         self.increment_iteration = args.increment_iteration if hasattr(args, 'increment_iteration') else True
         self.shared_concepts = []
         self.client_concepts = []
-        self.current_concept_id = -1
+        self.current_concept_id = 0 # Initialize current_concept_id to 0 (initial concept)
         self.current_concept = None
         self.drift_patterns = None
         self.drift_schedule = None
@@ -115,51 +126,59 @@ class Client(object):
         self.pin_memory = args.pin_memory
 
     def update_iteration(self, new_iteration):
-        """更新当前迭代计数器，用于概念漂移数据集"""
+        """更新当前迭代计数器，并根据配置应用概念漂移。"""
         if hasattr(self, 'current_iteration'):
             self.current_iteration = new_iteration
         
-        # --- Apply Complex Drift at the start of a new iteration/round ---
-        if self.complex_drift_config and self.superclass_maps:
-            # Apply to training data
-            if hasattr(self.train_data, 'targets') and isinstance(self.train_data.targets, list):
-                # Ensure targets are modifiable (e.g. list, not tuple)
-                train_targets_list = list(self.train_data.targets)
-                drift_applied_train = apply_complex_drift(
-                    train_targets_list, 
-                    self.id, 
-                    new_iteration, # Assuming new_iteration is the current global round/epoch
-                    self.complex_drift_config, 
-                    self.superclass_maps
-                )
-                if drift_applied_train:
-                    self.train_data.targets = train_targets_list # Update with modified targets
-                    # print(f"Client {self.id}: Complex drift applied to training data at iteration {new_iteration}.")
-            # else:
-                # print(f"Client {self.id}: Warning - train_data.targets not found or not a list, cannot apply complex drift.")
+        if self.complex_drift_config:
 
-            # Apply to testing data
-            if hasattr(self.test_data, 'targets') and isinstance(self.test_data.targets, list):
-                test_targets_list = list(self.test_data.targets)
-                drift_applied_test = apply_complex_drift(
-                    test_targets_list, 
-                    self.id, 
-                    new_iteration, 
-                    self.complex_drift_config, 
-                    self.superclass_maps
+            # 统一由 apply_complex_drift 处理所有复杂漂移和概念ID
+            empty_superclass_maps = ({}, {}, [], [])
+            current_superclass_maps_to_use = self.superclass_maps if self.superclass_maps and self.superclass_maps[0] else empty_superclass_maps
+
+            def process_dataset_for_drift(dataset, dataset_name):
+                if not isinstance(dataset, list) or not all(isinstance(item, tuple) and len(item) == 2 for item in dataset):
+                    print(f"Client {self.id}: {dataset_name} is not in the expected format (list of (feature, label) tuples). Skipping drift application.")
+                    return False, None
+                if not dataset:
+                    print(f"Client {self.id}: {dataset_name} is empty. Skipping drift application.")
+                    return False, None
+                try:
+                    original_labels_list = [item[1].item() if isinstance(item[1], torch.Tensor) else item[1] for item in dataset]
+                except Exception as e:
+                    print(f"Client {self.id}: Error extracting labels from {dataset_name}: {e}. Skipping drift application.")
+                    return False, None
+                modified_labels_list = list(original_labels_list)
+                drift_applied, current_concept_id = apply_complex_drift(
+                    modified_labels_list,
+                    str(self.id),
+                    new_iteration,
+                    self.complex_drift_config,
+                    current_superclass_maps_to_use,
+                    fixed_concept_mappings=self.fixed_concept_mappings,
+                    client_chosen_concept_index=self.client_chosen_concept_index
                 )
-                if drift_applied_test:
-                    self.test_data.targets = test_targets_list
-                    # print(f"Client {self.id}: Complex drift applied to testing data at iteration {new_iteration}.")
-            # else:
-                # print(f"Client {self.id}: Warning - test_data.targets not found or not a list, cannot apply complex drift.")
-        # --- End Apply Complex Drift ---
-            
+                if drift_applied:
+                    for i in range(len(dataset)):
+                        new_label_tensor = torch.tensor(modified_labels_list[i], dtype=torch.int64)
+                        dataset[i] = (dataset[i][0], new_label_tensor)
+                    print(f"Client {self.id}: Complex drift applied to {len(modified_labels_list)} samples in {dataset_name} at iteration {new_iteration}.")
+                return drift_applied, current_concept_id
+
+            # 只需处理一次，取 train_data 的 concept_id 作为全局当前概念
+            _, current_concept_id = process_dataset_for_drift(self.train_data, "train_data")
+            self.current_concept_id = current_concept_id if current_concept_id is not None else self.current_concept_id
+            process_dataset_for_drift(self.test_data, "test_data")
+        # ...existing code...
     def update_concept(self, concept):
         """更新当前使用的概念"""
         self.current_concept = concept
-        if concept is not None and 'id' in concept:
-            self.current_concept_id = concept['id']
+        if concept is not None and 'id' in concept: # This is for general concept objects, might not be used if fixed_concept_mappings is the primary source of truth for ID
+            # self.current_concept_id = concept['id'] # This line might conflict with the update in update_iteration
+            # Decide the source of truth for current_concept_id. 
+            # If update_iteration handles it for fixed_concept_switch, this might be redundant or for other types of concept updates.
+            # For now, let update_iteration be the primary place to set current_concept_id during drift.
+            pass # Avoid overwriting if update_iteration already set it based on fixed_concept_switch
             
     def load_train_data(self, batch_size=None):
         """加载训练数据，支持概念漂移数据集"""
@@ -207,7 +226,7 @@ class Client(object):
                     try:
                         target_model_part.load_state_dict(params_dict, strict=False)
                     except Exception as e_non_strict:
-                        # print(f"Client {self.id}: Error loading feature_extractor params (strict=False): {e_non_strict}")
+                        print(f"Client {self.id}: Error loading feature_extractor params (strict=False): {e_non_strict}")
                         pass # Or handle more gracefully
             # else:
                 # print(f"Client {self.id}: Could not identify feature extractor part to set parameters.")
@@ -343,28 +362,88 @@ class Client(object):
 
     def train_metrics(self):
         trainloader = self.load_train_data()
-        # self.model = self.load_model('model')
-        # self.model.to(self.device)
         self.model.eval()
 
         train_num = 0
-        losses = 0
+        losses = 0.0  # Initialize losses
+        y_prob_auc = [] # Initialize for AUC
+        y_true_auc = [] # Initialize for AUC
+
         with torch.no_grad():
             for x, y in trainloader:
-                if type(x) == type([]):
-                    x[0] = x[0].to(self.device)
+                if isinstance(x, list): # Handle cases where x might be a list (e.g. for text data)
+                    x = [item.to(self.device) for item in x]
                 else:
                     x = x.to(self.device)
                 y = y.to(self.device)
+                
                 output = self.model(x)
                 loss = self.loss(output, y)
+                
+                losses += loss.item() * y.size(0) # Accumulate weighted loss
                 train_num += y.shape[0]
-                losses += loss.item() * y.shape[0]
 
-        # self.model.cpu()
-        # self.save_model(self.model, 'model')
+                # For AUC calculation on training data (optional)
+                # Ensure output is suitable for softmax/sigmoid and label_binarize
+                if output.ndim == 2 and output.shape[1] == self.num_classes:
+                    y_prob_auc.append(F.softmax(output, dim=1).detach().cpu().numpy())
+                    y_true_auc.append(label_binarize(y.detach().cpu().numpy(), classes=range(self.num_classes)))
+                elif output.ndim == 2 and output.shape[1] == 1 and self.num_classes == 2: # Binary case with single logit output
+                    probs = torch.sigmoid(output).detach().cpu().numpy()
+                    y_prob_auc.append(np.hstack((1-probs, probs))) # Convert to [prob_class_0, prob_class_1]
+                    y_true_auc.append(label_binarize(y.detach().cpu().numpy(), classes=range(self.num_classes))) # Should be [0, 1]
+                # else: # Log a warning or handle other cases if necessary
+                    # print(f"Client {self.id}: Output shape {output.shape} or num_classes {self.num_classes} not directly handled for train AUC.")
 
-        return losses, train_num
+        if train_num == 0:
+            # print(f"Client {self.id}: Warning - train_num is 0 in train_metrics(). Returning zero loss and AUC.")
+            return 0.0, 0.0 # loss, auc
+            
+        avg_loss = losses / train_num
+        train_auc = 0.0 # Initialize train_auc
+        if len(y_prob_auc) > 0 and len(y_true_auc) > 0:
+            try:
+                y_prob_all_auc = np.concatenate(y_prob_auc, axis=0)
+                y_true_all_auc = np.concatenate(y_true_auc, axis=0)
+                if y_prob_all_auc.size > 0 and y_true_all_auc.size > 0:
+                    if self.num_classes > 2:
+                        # Ensure y_true_all_auc is 2D for multi_class='ovr'
+                        if y_true_all_auc.ndim == 1:
+                            # This might happen if label_binarize wasn't called or returned 1D array unexpectedly
+                            # Attempt to reshape or handle, though ideally label_binarize handles this.
+                            # For now, we rely on label_binarize to produce correct shape.
+                            pass 
+                        if y_true_all_auc.ndim == 2 and y_true_all_auc.shape[1] == self.num_classes and y_prob_all_auc.shape[1] == self.num_classes:
+                            train_auc = metrics.roc_auc_score(y_true_all_auc, y_prob_all_auc, average='weighted', multi_class='ovr')
+                        # else: # Log shape mismatch
+                            # print(f"Client {self.id}: Shape mismatch for multi-class AUC. y_true: {y_true_all_auc.shape}, y_prob: {y_prob_all_auc.shape}")
+                    elif self.num_classes == 2:
+                        # For binary, ensure y_true_all_auc is 1D (or select the positive class column if binarized)
+                        # and y_prob_all_auc corresponds to the positive class probability.
+                        true_labels_for_auc = y_true_all_auc
+                        if y_true_all_auc.ndim == 2 and y_true_all_auc.shape[1] == 2:
+                            true_labels_for_auc = y_true_all_auc[:, 1] # Use the positive class column
+                        elif y_true_all_auc.ndim == 2 and y_true_all_auc.shape[1] == 1: # if binarize gave [[0],[1]]
+                             true_labels_for_auc = y_true_all_auc.flatten()
+                        
+                        prob_positive_class = y_prob_all_auc
+                        if y_prob_all_auc.ndim == 2 and y_prob_all_auc.shape[1] == 2:
+                            prob_positive_class = y_prob_all_auc[:, 1]
+                        elif y_prob_all_auc.ndim == 2 and y_prob_all_auc.shape[1] == 1: # if model outputs single probability
+                            prob_positive_class = y_prob_all_auc.flatten()
+
+                        if true_labels_for_auc.ndim == 1 and prob_positive_class.ndim == 1:
+                           train_auc = metrics.roc_auc_score(true_labels_for_auc, prob_positive_class)
+                        # else: # Log shape mismatch
+                            # print(f"Client {self.id}: Shape mismatch for binary AUC. y_true: {true_labels_for_auc.shape}, y_prob: {prob_positive_class.shape}")
+            except ValueError as e:
+                # print(f"Client {self.id}: Could not calculate train AUC: {e}")
+                train_auc = 0.0 # Set to 0.0 on error
+            except Exception as e: # Catch any other unexpected errors during AUC calculation
+                # print(f"Client {self.id}: Unexpected error calculating train AUC: {e}")
+                train_auc = 0.0
+        
+        return avg_loss, train_auc
 
     # def get_next_train_batch(self):
     #     try:

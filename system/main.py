@@ -9,6 +9,7 @@ import numpy as np
 import torchvision
 import logging
 import yaml # Added YAML import
+import json # Added JSON import
 
 import wandb # Added for Weights & Biases
 
@@ -52,6 +53,10 @@ from flcore.servers.serverflash import Flash
 from flcore.servers.serverfedrc import serverFedRC # Add FedRC server import
 
 from flcore.trainmodel.models import *
+
+# --- Import for generating fixed concept mappings ---
+from utils.concept_drift_utils import generate_k_fixed_label_mappings, load_superclass_maps
+# --- End import ---
 
 from flcore.trainmodel.bilstm import *
 from flcore.trainmodel.resnet import *
@@ -471,6 +476,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     # Add an argument for the config file
+    parser.add_argument('--seed', type=int, default=42, 
+                        help='random seed')
     parser.add_argument('-cfg', "--config_file", type=str, default="../config.yaml", 
                         help="Path to the YAML configuration file")
     # general
@@ -659,7 +666,7 @@ if __name__ == "__main__":
     parser.add_argument('--dca_vwc_K_t', type=int, default=3, help="FedDCA: Number of VWC iterations per global round (K_t).") # New Argument
     parser.add_argument('--drift_detection_threshold', type=float, default=0.5, help="FedDCA: Threshold for concept drift detection based on label profiles.")
     parser.add_argument('--cluster_update_freq', type=int, default=10, help="FedDCA: Frequency (in global rounds) for updating client-cluster assignments.")
-    parser.add_argument('--num_profile_samples', type=int, default=1000, help="FedDCA: Number of samples to use for constructing label/feature profiles (e.g., for GMM).")
+    parser.add_argument('--num_profile_samples', type=int, default=30, help="FedDCA: Number of samples to use for constructing label/feature profiles (e.g., for GMM).")
 
     # --- Complex Concept Drift Arguments ---
     parser.add_argument('--complex_drift_scenario', type=str, default=None, 
@@ -700,6 +707,26 @@ if __name__ == "__main__":
     parser.add_argument('--ablation_fixed_clusters', type=int, default=0, help="FedDCA-FixedK: If > 0, initializes with K fixed clusters and does not change them. (0 means dynamic clustering)")
     parser.add_argument('--ablation_no_reinit_clf', action='store_true', help="FedDCA-NoReinit: Do not reinitialize classifiers upon cluster changes.")
 
+    parser.add_argument('--cluster_visualization_type', type=str, default='scatter',
+                        choices=['scatter', 'voronoi'],
+                        help="Type of cluster visualization (e.g., 'scatter', 'voronoi').")
+    parser.add_argument('--cluster_tsne_feature_source', type=str, default='lp',
+                        choices=['lp', 'model_params'],
+                        help="Source of features for t-SNE (e.g., 'lp' for label profiles, 'model_params' for model parameters).")
+
+    # --- Initial Model Loading Arguments ---
+    parser.add_argument('--enable_initial_model_loading', action='store_true', 
+                        help='Enable loading of a pre-trained initial model for the global model.')
+    parser.add_argument('--initial_model_path', type=str, default=None, 
+                        help='Path to the .pt or .pth file for the initial global model.')
+    
+    # --- Fixed Concept Drift Mapping Arguments ---
+    parser.add_argument('--num_drift_concepts', type=int, default=0,
+                        help='Number of fixed concept mapping patterns (K). If 0, uses original random drift per client.')
+    # --- End Fixed Concept Drift Mapping Arguments ---
+    parser.add_argument('--save_results_gap', type=int, default=5,
+                        help='Gap in global rounds to save results to WandB or local storage.')
+
     args = parser.parse_args()
 
     # --- Construct complex_drift_config from args ---
@@ -715,6 +742,84 @@ if __name__ == "__main__":
     else:
         args.drift_config = None
     # --- End Construct complex_drift_config ---
+
+    # --- Generate K fixed concept mappings if num_drift_concepts > 0 ---
+    args.fixed_concept_mappings = None
+    if args.complex_drift_scenario and args.num_drift_concepts > 0:
+        fine_to_coarse_map, coarse_to_fine_map, all_fine_labels, all_coarse_labels = {}, {}, [], []
+        if args.superclass_map_path:
+            if not os.path.isabs(args.superclass_map_path):
+                script_dir = os.path.dirname(os.path.realpath(__file__))
+                project_root = os.path.dirname(script_dir)
+                resolved_path = os.path.join(project_root, args.superclass_map_path)
+            else:
+                resolved_path = args.superclass_map_path
+            
+            if os.path.exists(resolved_path):
+                try:
+                    # Use the load_superclass_maps utility function
+                    fine_to_coarse_map, coarse_to_fine_map, all_fine_labels, all_coarse_labels = load_superclass_maps(resolved_path)
+                    if fine_to_coarse_map: # Check if loading was successful
+                        print(f"Successfully loaded and processed superclass map from {resolved_path}")
+                    else:
+                        print(f"Warning: load_superclass_maps returned empty maps from {resolved_path}. Fixed mappings might be suboptimal or fail.")
+                except Exception as e:
+                    print(f"Warning: Could not load or process superclass map from {resolved_path}: {e}")
+            else:
+                print(f"Warning: Superclass map file not found at {resolved_path}")
+
+        drift_type_for_fixed_mappings = None
+        scenario_lower = args.complex_drift_scenario.lower()
+
+        if "intra_superclass" in scenario_lower: # Handles "xxx_intra_superclass"
+            drift_type_for_fixed_mappings = "intra_superclass"
+            if not fine_to_coarse_map and args.superclass_map_path: 
+                print(f"Warning (client {args.num_clients if hasattr(args, 'num_clients') else 'N/A'}): Intra-superclass drift specified, but superclass map at '{args.superclass_map_path}' could not be loaded. Fixed mappings might be suboptimal or random.")
+            elif not args.superclass_map_path:
+                 print(f"Info (client {args.num_clients if hasattr(args, 'num_clients') else 'N/A'}): Intra-superclass drift specified, but no superclass_map_path provided. Mappings will be random if not based on superclasses.")
+        elif "inter_superclass" in scenario_lower: # Handles "xxx_inter_superclass"
+            drift_type_for_fixed_mappings = "inter_superclass"
+            if not fine_to_coarse_map and args.superclass_map_path: 
+                 print(f"Warning (client {args.num_clients if hasattr(args, 'num_clients') else 'N/A'}): Inter-superclass drift specified, but superclass map at '{args.superclass_map_path}' could not be loaded. Fixed mappings might be suboptimal or random.")
+            elif not args.superclass_map_path:
+                print(f"Info (client {args.num_clients if hasattr(args, 'num_clients') else 'N/A'}): Inter-superclass drift specified, but no superclass_map_path provided. Mappings will be random if not based on superclasses.")
+        elif scenario_lower == "fixed_concept_switch":
+            print(f"Info: For 'fixed_concept_switch' scenario, defaulting to 'inter_superclass' for generating {args.num_drift_concepts} concept mappings.")
+            drift_type_for_fixed_mappings = "inter_superclass"
+            if not fine_to_coarse_map and args.superclass_map_path:
+                 print(f"Warning: Superclass map specified at '{args.superclass_map_path}' but could not be loaded. 'inter_superclass' (default for fixed_concept_switch) mappings will be random.")
+            elif not args.superclass_map_path:
+                print("Info: No superclass map provided for 'fixed_concept_switch'. 'inter_superclass' (default) mappings will be random (not based on superclasses).")
+        
+        if drift_type_for_fixed_mappings:
+            original_labels_list = list(range(args.num_classes))
+            # Default drift_percentage in generate_k_fixed_label_mappings is 0.2 (20% of labels changed)
+            # This can be made configurable by adding a new command-line argument if needed.
+            # e.g., args.drift_percentage_fixed_concepts
+            
+            args.fixed_concept_mappings = generate_k_fixed_label_mappings(
+                num_concepts=args.num_drift_concepts,
+                num_classes=args.num_classes,
+                fine_to_coarse_map=fine_to_coarse_map,
+                coarse_to_fine_map=coarse_to_fine_map,
+                all_fine_labels=all_fine_labels,
+                all_coarse_labels=all_coarse_labels,
+                drift_type=drift_type_for_fixed_mappings,
+                original_labels=original_labels_list
+                # drift_percentage=getattr(args, 'drift_percentage_fixed_concepts', 0.2) # Example
+            )
+            if args.fixed_concept_mappings:
+                print(f"Successfully generated {len(args.fixed_concept_mappings)} fixed concept mappings using '{drift_type_for_fixed_mappings}' strategy.")
+                # Optional: print a sample of the first generated mapping for verification
+                # if len(args.fixed_concept_mappings) > 0 and isinstance(args.fixed_concept_mappings[0], dict):
+                #     sample_mapping = list(args.fixed_concept_mappings[0].items())[:5]
+                #     print(f"Sample of first generated mapping (first 5 pairs): {sample_mapping}")
+            else:
+                print(f"Warning: Failed to generate fixed concept mappings for K={args.num_drift_concepts} using '{drift_type_for_fixed_mappings}' strategy. This may lead to errors if the scenario expects them.")
+        else:
+            print(f"Warning: Could not determine a base drift type (e.g., intra/inter-superclass) for generating fixed mappings from scenario: '{args.complex_drift_scenario}'. No fixed mappings generated. This may cause issues if the scenario relies on them.")
+
+    # --- End Generate K fixed concept mappings ---
 
     if args.device_id != "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
