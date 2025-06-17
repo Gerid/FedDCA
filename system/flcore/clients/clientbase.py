@@ -75,6 +75,7 @@ class Client(object):
         self.client_concepts = []
         self.current_concept_id = 0 # Initialize current_concept_id to 0 (initial concept)
         self.current_concept = None
+        self.concept_history = [] # Add this line
         self.drift_patterns = None
         self.drift_schedule = None
         self.drift_args = None
@@ -168,6 +169,7 @@ class Client(object):
             # 只需处理一次，取 train_data 的 concept_id 作为全局当前概念
             _, current_concept_id = process_dataset_for_drift(self.train_data, "train_data")
             self.current_concept_id = current_concept_id if current_concept_id is not None else self.current_concept_id
+            self.concept_history.append(self.current_concept_id) # Add this line
             process_dataset_for_drift(self.test_data, "test_data")
         # ...existing code...
     def update_concept(self, concept):

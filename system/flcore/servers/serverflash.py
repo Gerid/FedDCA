@@ -79,7 +79,7 @@ class Flash(Server):
                 
         # 最终评估和输出
         print("\n训练完成!")
-        self.evaluate(current_round=self.global_rounds) # Pass final round to evaluate
+        # self.evaluate(current_round=self.global_rounds) # Pass final round to evaluate
         
         # 输出耗时统计
         avg_time = sum(self.Budget) / len(self.Budget)

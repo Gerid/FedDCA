@@ -356,7 +356,7 @@ class FedDCA(Server):
 
             # Original evaluate call (can be removed if _comprehensive_evaluation covers it)
             # if i % self.eval_gap == 0:
-            #     print(f"\\n-------------Round number: {i}--------------")
+            #     print(f"\\n-------------Round numbeg'g: {i}--------------")
             #     print("Evaluate global model") # This is ServerBase.evaluate()
             #     self.evaluate() 
 

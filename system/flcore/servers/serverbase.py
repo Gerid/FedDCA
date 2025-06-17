@@ -53,6 +53,7 @@ class Server(object):
         self.rs_train_loss = []
         self.rs_f1_weighted = [] # Added for F1-score
         self.rs_tpr_weighted = [] # Added for TPR
+        self.client_concept_histories = {} # Add this line
 
         self.times = times
         self.eval_gap = args.eval_gap
@@ -232,6 +233,10 @@ class Server(object):
                 self.uploaded_ids.append(client.id)
                 self.uploaded_weights.append(client.train_samples)
                 self.uploaded_models.append(client.model)
+                # Store concept_history for this client
+                if client.id not in self.client_concept_histories:
+                    self.client_concept_histories[client.id] = []
+                self.client_concept_histories[client.id].append(client.current_concept_id) # Or client.concept_history if you want the whole list each time
         for i, w in enumerate(self.uploaded_weights):
             self.uploaded_weights[i] = w / tot_samples
 
@@ -300,37 +305,63 @@ class Server(object):
 
             with h5py.File(file_path, 'w') as hf:
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
-                hf.create_dataset('rs_test_auc', data=self.rs_test_auc) # rs_test_auc was missing, added it.
+                hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
-                hf.create_dataset('rs_f1_weighted', data=self.rs_f1_weighted) # Save F1
-                hf.create_dataset('rs_tpr_weighted', data=self.rs_tpr_weighted) # Save TPR
+                # Save F1-score and TPR if available
+                if hasattr(self, 'rs_f1_weighted') and self.rs_f1_weighted:
+                    hf.create_dataset('rs_f1_weighted', data=self.rs_f1_weighted)
+                if hasattr(self, 'rs_tpr_weighted') and self.rs_tpr_weighted:
+                    hf.create_dataset('rs_tpr_weighted', data=self.rs_tpr_weighted)
+                # Save client concept histories
+                if hasattr(self, 'client_concept_histories') and self.client_concept_histories:
+                    for client_id, history in self.client_concept_histories.items():
+                        hf.create_dataset(f'client_{client_id}_concept_history', data=history)
             
-            if self.args.use_wandb and wandb.run is not None:
-                try:
-                    # Determine a unique artifact name, perhaps incorporating the round if saving multiple times
-                    # For now, using the same logic as before, which might overwrite or version.
-                    artifact_name_suffix = f"_run_{self.times}" if hasattr(self, 'times') else ""
-                    artifact_name = f'{self.args.wandb_run_name_prefix}_results{artifact_name_suffix}'
-                    
-                    current_round_val = current_round if current_round is not None else self.current_round
-                    results_artifact = wandb.Artifact(
-                        artifact_name, # Use a consistent and informative name
-                        type='results',
-                        description=f'H5 results file for {self.algorithm}, run {self.times}, round {current_round_val}',
-                        metadata={'dataset': self.dataset, 'algorithm': self.algorithm, 'goal': self.goal, 'times': self.times, 'round': current_round_val,
-                                  'metrics_included': ['test_acc', 'test_auc', 'train_loss', 'f1_weighted', 'tpr_weighted']}
-                    )
-                    results_artifact.add_file(file_path, name=f'{algo}_{self.goal}_{self.times}.h5') # using algo, goal, times for filename consistency
-                    
-                    aliases = [f'run_{self.times}_round_{current_round_val}', 'latest_results']
-                    # Ensure global_rounds is an int for comparison
-                    if current_round_val == int(self.global_rounds) -1 or current_round_val == int(self.global_rounds): 
-                        aliases.append(f'run_{self.times}_final_results')
+            # Log to wandb if enabled
+            if self.args.wandb and wandb.run is not None:
+                wandb_log_data = {
+                    "test_accuracy": self.rs_test_acc[-1] if self.rs_test_acc else None,
+                    "test_auc": self.rs_test_auc[-1] if self.rs_test_auc else None,
+                    "train_loss": self.rs_train_loss[-1] if self.rs_train_loss else None
+                }
+                if hasattr(self, 'rs_f1_weighted') and self.rs_f1_weighted:
+                    wandb_log_data["f1_weighted"] = self.rs_f1_weighted[-1]
+                if hasattr(self, 'rs_tpr_weighted') and self.rs_tpr_weighted:
+                    wandb_log_data["tpr_weighted"] = self.rs_tpr_weighted[-1]
+                
+                # Log client concept histories to wandb
+                if hasattr(self, 'client_concept_histories') and self.client_concept_histories:
+                    for client_id, history in self.client_concept_histories.items():
+                        # Log the latest concept for each client at the current round
+                        if history: # Check if history is not empty
+                           wandb_log_data[f'client_{client_id}_current_concept'] = history[-1]
+                
+                # Filter out None values before logging
+                wandb_log_data = {k: v for k, v in wandb_log_data.items() if v is not None}
+                if wandb_log_data: # only log if there is something to log
+                    wandb.log(wandb_log_data, step=current_round if current_round is not None else self.current_round)
 
-                    wandb.log_artifact(results_artifact, aliases=aliases)
-                    print(f"Results H5 file saved to wandb as artifact: {artifact_name} ({algo}_{self.goal}_{self.times}.h5)")
-                except Exception as e:
-                    print(f"Error saving results H5 to wandb: {e}")
+        # Save other types of results if needed (e.g., DLG results)
+        if self.dlg_eval and len(self.rs_dlg_acc) > 0:
+            algo_filename_dlg = algo + "_dlg_" + str(self.times)
+            file_path_dlg = result_path + "{}.h5".format(algo_filename_dlg)
+            print("File path for saving DLG results: " + file_path_dlg)
+            with h5py.File(file_path_dlg, 'w') as hf:
+                hf.create_dataset('rs_dlg_acc', data=self.rs_dlg_acc)
+                hf.create_dataset('rs_dlg_auc', data=self.rs_dlg_auc)
+                hf.create_dataset('rs_dlg_f1', data=self.rs_dlg_f1)
+                hf.create_dataset('rs_dlg_tpr', data=self.rs_dlg_tpr)
+
+            if self.args.wandb and wandb.run is not None:
+                wandb_log_dlg_data = {
+                    "dlg_accuracy": self.rs_dlg_acc[-1] if self.rs_dlg_acc else None,
+                    "dlg_auc": self.rs_dlg_auc[-1] if self.rs_dlg_auc else None,
+                    "dlg_f1": self.rs_dlg_f1[-1] if self.rs_dlg_f1 else None,
+                    "dlg_tpr": self.rs_dlg_tpr[-1] if self.rs_dlg_tpr else None
+                }
+                wandb_log_dlg_data = {k: v for k, v in wandb_log_dlg_data.items() if v is not None}
+                if wandb_log_dlg_data:
+                    wandb.log(wandb_log_dlg_data, step=current_round if current_round is not None else self.current_round)
 
     def save_item(self, item, item_name):
         if not os.path.exists(self.save_folder_name):
